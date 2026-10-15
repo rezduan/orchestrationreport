@@ -1,0 +1,1561 @@
+# A2.5.1 Revision 6 — Specification Packet (proposed)
+
+*Prepared 2026-10-15 for an independent, text-only adversarial reviewer. Send this whole file. Section 12 contains the reviewer's instructions; sections 0–11 are the material under review.*
+
+**Sources:** the Revision 5 packet (`2026-10-15-a2.5.1-revision-5-review-packet.md`) and the Revision 5 independent review (verdict REVISE, findings R5-01 to R5-07), supplied by the owner. No repository was modified; nothing was implemented or executed.
+
+---
+
+## 0. Status, labels, conventions
+
+**Status.** Proposed design text for independent review. Nothing has been implemented, executed, measured or accepted. A review PASS does not authorise implementation. Implementation and commit each need their own separate authorisation.
+
+**Evidence labels**
+
+| Label | Meaning |
+|---|---|
+| [M] | Measured earlier and reported to the author; not re-run |
+| [R] | Reasoned |
+| [P] | Proposed fixture, not executed |
+| [U] | Unresolved; fails closed |
+
+**Fixture status**
+
+| Status | Meaning |
+|---|---|
+| **BINDING** | Expectation follows from binding decisions plus normative rules that do not depend on any open register item. Only these count as unconditional coverage. |
+| **PENDING-OWNER(P-n)** | Depends on a PROPOSED item. The **interim** expectation, under that item's pre-decision behaviour, is given. If it differs, the **if-adopted** expectation is given too. |
+| **PENDING-VERIFICATION(UR-n)** | Depends on unverified git or filesystem behaviour. |
+| **GATED(G-F)** | Depends on the FETCH_HEAD positive-evidence gate (§1.6.6). The interim expectation assumes the gate is CLOSED. |
+| **OUT-OF-MODEL** | A demonstration of a stated limitation, never counted as a correctness pass. |
+
+**R6Δ** marks text that is new or changed relative to Revision 5.
+
+**Register scope.** §2 lists policy choices only. Every PROPOSED item now has a **pre-decision behaviour (PDB)**: the normative, fail-closed behaviour the design uses until the owner decides (R5-07). Wherever a rule in §1 depends on a register item, it is tagged at the rule itself as `[P-n · PDB: …]`.
+
+---
+
+## 1. Normative specification
+
+### 1.1 Scope and terms
+
+**Scope [B-01, B-02].** A read-only helper with isolated adversarial fixtures. It replaces A2.5 Observe step 4 only. Observe copies the helper's output line, its `recommend` field and the §1.10 caveats verbatim.
+
+**Non-goals:**
+- D2–D5 and A2.6;
+- deployment, production or completion status;
+- attributing a change to a merge request or an author;
+- writing to any repository;
+- changing memory, status or NEXT;
+- detecting semantic reverts;
+- local `.git` forgery (outside the threat model).
+
+**Terms**
+
+| Term | Definition |
+|---|---|
+| T | Object id of `refs/remotes/origin/development`, resolved once. Never local `development`. |
+| X ⊑ Y | `merge-base --is-ancestor X Y` returns 0 → true; 1 → false; any other exit → C10. |
+| present(X) | X ⊑ T. |
+| np(X) | Number of parents of X, from a strict parse of `cat-file commit X`. |
+| parent0(X) | X^1, or the empty tree `4b825dc642cb6eb9a060e54bf8d69288fbee4904` when np(X) = 0. |
+| paths(C) | `diff-tree -r --no-renames --name-only -z parent0(C) C`, NUL-split, sorted bytewise. |
+| FP | `rev-list --first-parent T`, newest to oldest. pos(X) is the index from the oldest end. |
+| P | When present(C): the oldest X ∈ FP with C ⊑ X. |
+| GitLab pair (S, M) | M ∈ FP, np(M) = 2, S = M^2, np(S) = 1, S^1 = M^1, tree(S) = tree(M). [M] 3/3 in the target project. |
+| pid(A, B) | Defined in §1.7.2. A NULL pid never matches anything. |
+| I | Integration evidence: (via, base, tip, end, integrating, merge, segment, anchor). |
+| CU | Candidate unit: (parent0(C), C) over paths(C). This is the only unit whose content is assessed. |
+| IU | Integration unit: (I.base, I.tip). Used only for revert matching and diagnostics. |
+
+### 1.2 Inputs — R6Δ (R5-06)
+
+`merge-status --repo <path> <C> [--now <TS>]`
+
+| Row | Condition | Result |
+|---|---|---|
+| A01 | C fails `^[0-9a-f]{40}$` | bad-input |
+| A02 | `--repo` is not absolute, contains a `.` or `..` component, or differs from its realpath | bad-input |
+| A05 R6Δ | `--now` present but invalid (see below) | bad-input |
+
+**When `--now` is invalid (A05):**
+- it fails the ABNF `TS` syntax;
+- it is not a real calendar instant (e.g. month 13, Feb 30, hour 24, second 60);
+- it lies outside 1970-01-01T00:00:00Z … 9999-12-31T23:59:59Z;
+- it is given more than once.
+
+**Rules for `now`:**
+- `--now` is never compared with the system clock.
+- Evidence timestamps later than `now` are handled by the freshness rows R5, F03 and F08, not by A05.
+- Without `--now`, `now` is the system clock (UTC).
+
+**Test-only inputs.** Observe never passes these:
+- `--now` and `--trace-argv <file>`;
+- a harness callback interface that exists only when the helper is imported as a library. It provides phase hooks (after-snap0, after-classify, between-snap0-files) and git-result substitution, with no CLI exposure.
+
+### 1.3 Controlled environment (unchanged from Revision 5)
+
+The helper runs as `python3 -I` with the standard library only. Each git call:
+- is an argv array, with no shell;
+- runs with a private, empty temp directory as its cwd;
+- is executed as:
+
+```
+env -i PATH=/usr/bin:/bin HOME=<helper-private empty dir> LC_ALL=C TZ=UTC
+       GIT_DIR=<repo>/.git GIT_WORK_TREE=<repo> GIT_CEILING_DIRECTORIES=<parent of repo>
+       GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_ATTR_NOSYSTEM=1
+       GIT_OPTIONAL_LOCKS=0 GIT_NO_REPLACE_OBJECTS=1 GIT_LITERAL_PATHSPECS=1 GIT_TERMINAL_PROMPT=0
+  /usr/bin/git --no-replace-objects --no-pager --literal-pathspecs
+    -c core.fsmonitor=false -c core.commitGraph=false -c core.attributesFile=/dev/null
+    -c core.quotePath=true -c core.bigFileThreshold=512m
+    -c diff.context=3 -c diff.interHunkContext=0 -c diff.indentHeuristic=true
+    -c diff.suppressBlankEmpty=false -c diff.relative=false -c diff.noprefix=false
+    -c diff.mnemonicPrefix=false -c diff.renames=false -c diff.algorithm=myers
+    -c diff.submodule=short -c diff.ignoreSubmodules=none
+    -c log.showSignature=false -c gpg.program=/bin/false -c gpg.ssh.program=/bin/false
+    -c gpg.x509.program=/bin/false -c patchid.verbatim=true -c patchid.stable=<UR-4>
+```
+
+**Allowlist** (fixed forms at each call site):
+
+| Command | Allowed forms |
+|---|---|
+| `version` | — |
+| `rev-parse` | `--absolute-git-dir`, `--is-bare-repository`, `--is-shallow-repository`, `--show-object-format`, `--verify -q <oid\|ref\|oid:path>` |
+| `symbolic-ref -q` | — |
+| `cat-file` | `-t`, `-s`, `-e`, `blob <oid>`, `commit <oid>`. Strict header parse: `tree`, then `parent*`; ≤ 64 KiB. |
+| `ls-tree` | `-z --full-tree <commit> -- <path>` |
+| `rev-list` | Bounded forms named in §1.8 and §6 |
+| `merge-base` | `--all`, `--is-ancestor` |
+| `for-each-ref` | `--contains`, `--format` |
+| `diff` | The `DIFF` form only |
+| `diff-tree` | `-r --no-renames --name-only -z`; `--cc --name-only -z --no-ext-diff --no-textconv` |
+| `patch-id` | `--verbatim` |
+| `config` | `--get`, `--get-all`, `--list --show-scope -z` |
+
+**Forbidden:** `log`, `show`, `reflog`, `fetch`, `pull`, `ls-remote`, `gc`, `fsck`, `cat-file --textconv/--filters`, and anything else.
+
+**Exit codes, caps and paths:**
+- A non-zero exit → C10, except these documented false results: `--is-ancestor` 1; `rev-parse --verify -q` 1; `symbolic-ref -q` 1; `cat-file -e` 1.
+- stdout over 64 MiB → C08. A call over 60 s → C09.
+- stderr is discarded.
+- Paths come only from `-z` output and are passed after `--` as literal pathspecs.
+
+**No side effects [R]:**
+- no hooks run and no pager is used;
+- `--no-ext-diff --no-textconv` is always set, and textconv, external-diff and signature keys are refused at preflight;
+- gpg programs are pinned to `/bin/false`;
+- no index or worktree access;
+- tree-to-tree diffs apply no conversion.
+
+### 1.4 Preflight (unchanged from Revision 5)
+
+**Phase A:** A01, A02, A05 (§1.2), plus:
+
+| Row | Condition | Result |
+|---|---|---|
+| A03 | `<repo>` or `<repo>/.git` is not a real directory (symlink, `.git` file, linked worktree) | integrity-refused |
+| A04 | `st_uid(.git)` ≠ euid | unsafe-ownership |
+
+**Phase C:**
+
+| Row | Condition | Result |
+|---|---|---|
+| C01 | `git version` does not match `^git version 2\.43\.[0-9]+$` | unsupported-version |
+| C02 | absolute-git-dir ≠ realpath, or bare, or git ownership refusal | preflight |
+| C03 | object format ≠ `sha1` | object-format |
+| C04 | integrity refusal | integrity-refused |
+| C05 | configuration refusal | config-refused |
+| C06 | target ref absent | target-missing |
+| C07 | target ref is symbolic (or its loose file begins `ref:`) | symbolic-target |
+
+**C04 integrity refusals.** Any of these present or non-empty:
+- `shallow`, `info/grafts`, `objects/info/alternates`, `objects/info/http-alternates`;
+- any `refs/replace/*`, loose or packed;
+- `config.worktree`, `commondir`;
+- a non-empty `info/attributes`;
+- any `extensions.*` key outside {`objectFormat=sha1`, `refStorage=files`}.
+
+**C05 configuration refusals.** Local scope only:
+- `include.*`, `includeIf.*`;
+- `diff.*.command`, `.textconv`, `.binary`, `.funcname`, `.xfuncname`, `.wordRegex`, `.cachetextconv`;
+- `diff.external`, `diff.orderFile`;
+- `core.attributesFile`, `core.alternateRefsCommand`, `core.sshCommand`, `core.worktree`;
+- `gpg.*`, `log.showSignature`;
+- `uploadpack.*`, `protocol.*`.
+
+`url.*.insteadOf` and `pushInsteadOf` are not refused; they make F inadmissible instead (F04).
+
+**Stated limit:** the denylist cannot cover configuration keys added in future git versions. That risk is bounded by the 2.43.x pin.
+
+### 1.5 Snapshot model — R6Δ (R5-03)
+
+**File records.** Each record is (relpath bytes, kind ∈ {absent, regular, dir}, st_dev, st_ino, size, mtime_ns, ctime_ns, sha256) [P-17 · PDB: include ctime and inode].
+- Files are opened with `O_NOFOLLOW` and must resolve inside realpath(`.git`).
+- Regular files are capped at 4 MiB.
+- A symlink, FIFO, device, oversize or unreadable entry inside the scope is a read failure.
+- Directory records make adding or removing an entry visible.
+
+**Scope:**
+- `config`, `packed-refs`, `FETCH_HEAD`, and the C04 files;
+- everything under `refs/heads/`, `refs/remotes/origin/`, `refs/replace/` and `logs/refs/remotes/origin/`, recursive and sorted.
+
+**Ref record:** T plus the SHA-256 of `for-each-ref --format='%(objectname) %(refname)' refs/heads/ refs/remotes/origin/`. It is taken only after preflight passes.
+
+**Equality** is byte equality of the serialised, sorted record lists, plus ref-record equality when both ref records exist.
+
+**Snapshot completeness (R6Δ).** Every output line carries `snapshot=` with exactly one of these values:
+
+| Value | When | What it means |
+|---|---|---|
+| `full` | snap0 and snap1 both have file records and ref records, and they compared equal | Equal within the full scope. **Not proof of stability** (see residuals). |
+| `files-only` | the initial ref record was never taken (failure in C01–C07, or `snap_refs` raised C10); file records compared equal | Only file records were compared. Ref-level state was **not** compared. |
+| `none` | phase A failure (A01–A05) or B01 | No comparison was made. |
+| `final-unreadable` | D01 | The final snapshot could not be read. **Stability is not claimed.** |
+
+D02 carries `snapshot=full` or `snapshot=files-only`, naming the scope of the comparison that found the difference.
+
+**Invariants (R6Δ):**
+- **I-1.** A provisional K result (any classification) can exist only after the ref record was taken, so every classified line carries `snapshot=full`. If an implementation ever reaches a K result with no initial ref record, it must emit C14 instead.
+- **I-2.** A `files-only` comparison may let **only** a provisional C-row result stand: one of C01–C07 or C10. It never lets a classification stand.
+- **I-3.** No line with `snapshot` other than `full` may be described as having verified stability.
+
+**Control flow** (§4). It produces these rows:
+
+| Row | Situation | Result |
+|---|---|---|
+| B01 | Initial file snapshot unreadable | TF `snapshot-unreadable-initial` |
+| — | Classification raises an exception | Converted to a provisional C row; the final snapshot is still attempted |
+| D01 | Final snapshot unreadable | TF `snapshot-unreadable-final` with the provisional trace |
+| D02 | Snapshots differ | TF `snapshot-changed` with the provisional trace; overrides every provisional result |
+| D00 | Snapshots equal | The provisional result stands |
+
+**Detects [R]:**
+- torn reads: snap1 re-reads every file;
+- change-then-restore within scope, via ctime [UR-12].
+
+**Residuals:**
+- the object store is not snapshotted;
+- anything outside the scope;
+- changes within one ctime tick on coarse filesystems;
+- privileged clock manipulation;
+- transient states that git calls observed and that were restored within one ctime tick.
+
+No atomicity or race-freedom is claimed.
+
+### 1.6 Freshness model — R6Δ (R5-02)
+
+#### 1.6.1 Inputs
+
+All taken from snap0 bytes and stats:
+- TR = `logs/refs/remotes/origin/development`;
+- OR = every file under `logs/refs/remotes/origin/` (includes TR);
+- FETCH_HEAD and its mtime_ns;
+- config: `remote.origin.url` (all values), `remote.origin.fetch` (all values), `remote.*.url`, and whether insteadOf / pushInsteadOf is present;
+- the current tracking refs (from the ref record);
+- `now`.
+
+#### 1.6.2 Reflog grammar
+
+```
+^([0-9a-f]{40}) ([0-9a-f]{40}) [^<\n]* <[^>\n]*> ([0-9]+) ([+-][0-9]{4})\t([^\n]*)$
+```
+
+- Fields: old, new, ts (UTC epoch seconds), tz (ignored).
+- cmdline = the message up to the first `": "`.
+- The last line of the file is the newest entry.
+
+#### 1.6.3 R rows (target reflog)
+
+| Row | Condition | Class |
+|---|---|---|
+| R1 | TR absent or empty | NONE |
+| R2 | any line is malformed | CONTRA(malformed) |
+| R3 | some earlier line has ts > the last line's ts | CONTRA(non-monotonic) |
+| R4 | last line's new ≠ T | CONTRA(newest-not-T) |
+| R5 | last line's ts > now | CONTRA(future) |
+| R6 | last line's cmdline not accepted | INSUF(newest-unaccepted, v = ts) |
+| R7 | otherwise | POS(ts) |
+
+**Accepted cmdlines:** `^(fetch|pull)( |$)`.
+- **`update by push`** [P-20 · PDB: **not accepted**, so it falls to R6]. If P-20 is adopted, `update by push` is accepted as well.
+
+#### 1.6.4 F rows (FETCH_HEAD)
+
+**Definitions:**
+- **norm(u):** applied in order, each once:
+  - (a) strip userinfo (`scheme://user[:pass]@` becomes `scheme://`; scp `user@host:` becomes `host:`);
+  - (b) remove one trailing `/`;
+  - (c) remove one trailing `.git`.
+
+  Comparison is byte-exact and case-sensitive.
+- **Origin lines** have norm(url) = norm(remote.origin.url).
+- **Dev lines D** are origin lines of the form `branch 'development'`.
+- **Whole-fetch set WF** [P-08 · PDB: as listed here]: `fetch`, `fetch origin`, `fetch --prune`, `fetch --prune origin`, `fetch origin --prune`, `fetch -p`, `fetch -p origin`, `fetch origin -p`.
+  - **`--all` forms** [P-12 · PDB: **excluded**]. If P-12 is adopted, they are admitted only when exactly one remote is configured.
+  - Any cmdline containing `--append` or a refspec is excluded.
+
+**Evaluation order:**
+1. F01–F03 (parse).
+2. F04–F05 (admissibility; these stop F evaluation).
+3. Corroboration checks P1–P7 (F06–F17), recording the first failure fc.
+4. Development decision (F18–F22).
+
+| Row | Check | Failure class / fetch_head |
+|---|---|---|
+| F01 | FETCH_HEAD absent or empty | NONE / `none` |
+| F02 | a line fails `^([0-9a-f]{40})\t(not-for-merge)?\t(branch\|tag\|remote-tracking branch) '([^'\n]*)' of ([^\n]+)$` | CONTRA / `malformed` |
+| F03 | mtime > now | CONTRA / `future` |
+| F04 | insteadOf or pushInsteadOf present | INSUF / `inadmissible-insteadof` |
+| F05 | `remote.origin.url` not single-valued | INSUF / `inadmissible-remote-url` |
+| F06 | refspec ≠ exactly `+refs/heads/*:refs/remotes/origin/*` | fc / `uncorroborated-refspec` |
+| F07 | any OR file malformed | fc / `uncorroborated-reflog-malformed` |
+| F08 | ts* > now | CONTRA / `future` |
+| F09 | P1: no OR entry | fc / `uncorroborated-no-fetch-event` |
+| F10 | P2: Enew cmdlines differ | fc / `uncorroborated-multiple-fetch-events` |
+| F11 | P3: cmdline ∉ WF | fc / `uncorroborated-not-whole-fetch` |
+| F12 | P3: an `--all` form with more than one remote (reached only if P-12 is adopted) | fc / `uncorroborated-multi-remote` |
+| F13 | P4: a non-origin line is present | fc / `uncorroborated-foreign-lines` |
+| F14 | P4: duplicate `branch '<n>'` names | fc / `uncorroborated-duplicate-lines` |
+| F15 | P5: content link fails (for each e ∈ Enew with new ≠ 0{40}, the origin line `branch '<name>'` must have sha = e.new) | fc / `uncorroborated-no-link` |
+| F16 | P6: completeness fails (excluding development and HEAD, origin branch lines must be in bijection with the current tracking refs, with equal values) | fc / `uncorroborated-incomplete` |
+| F17 | P7: \|mtime − ts*\| > W [P-11 · PDB: two-sided; UR-1 · W=120 s provisional] | fc / `uncorroborated-window` (or `uncorroborated-no-reflog` when ts* < mtime − W) |
+
+**Development decision.** "Corroborated" means no fc was recorded.
+
+| Row | Condition | Class / fetch_head |
+|---|---|---|
+| F18 | corroborated ∧ \|D\| = 1 ∧ D.sha = T ∧ **G-F OPEN** | POS(ts*) / `ok` |
+| **F22 R6Δ** | corroborated ∧ \|D\| = 1 ∧ D.sha = T ∧ **G-F CLOSED** | INSUF / `unverified-association` |
+| F19 | corroborated ∧ some D.sha ≠ T | NEG / `negative-conflict` [B-12] |
+| F20 | corroborated ∧ \|D\| = 0 | NEG / `negative-dev-absent` [P-10 · PDB: NEG] |
+| F21 | not corroborated ∧ some D.sha ≠ T | NEG / `negative-conflict-uncorroborated` [P-01 · PDB: NEG] |
+| — | not corroborated otherwise | INSUF / the fc row and token |
+
+**What P1–P7 would establish if G-F were OPEN [R; UR-8, UR-10, UR-1].** The association between the development line and the fetch event at ts* holds **only** under these assumptions:
+- a whole, non-append origin fetch truncates FETCH_HEAD and writes one line for every fetched branch, unchanged ones included [U13 / UR-10];
+- the reflog cmdline strings are as listed [U11 / UR-8];
+- W bounds the write gap [UR-1].
+
+These are **unverified**. Matching reflog evidence, tracking refs and FETCH_HEAD content does **not** by itself prove that every line came from one fetch.
+
+**Where mtime is used.** mtime is used only in F17 and only as the file's last-write time. It is never the timestamp of a line and never becomes `observed_at` [B-11].
+
+**Residuals** if G-F is ever opened:
+- a refspec-less URL fetch followed by `--no-write-fetch-head` can make observed_at overstate the fetch time by up to W;
+- the remote state was observed up to one fetch duration before ts* (this also applies to R);
+- the refspec at the time of the fetch is unknown;
+- crafted file and reflog pairs are forgery (L-7).
+
+#### 1.6.5 Combination (authoritative)
+
+| Row | R | F | observed_at | fresh | freshness_reason | source |
+|---|---|---|---|---|---|---|
+| Cb1 | any | NEG | none | no | conflict \| dev-absent \| conflict-uncorroborated | none |
+| Cb2 | CONTRA | not NEG | none | no | future \| newest-not-T \| non-monotonic \| malformed | none |
+| Cb3 | not CONTRA | CONTRA | none | no | future \| fetch-head-malformed | none |
+| Cb4 | POS(t_R) | POS(t*) | max | yes iff 0 ≤ now − obs ≤ 24 h | ok \| stale | both — **unreachable while G-F CLOSED** |
+| Cb5 | POS(t_R) | INSUF / NONE | t_R | same rule | ok \| stale | reflog |
+| Cb6 | INSUF(unaccepted, v) \| NONE | POS(t*) | t* | same rule | ok \| stale | fetch_head — **unreachable while G-F CLOSED** [P-09 · PDB: unreachable] |
+| Cb7 | INSUF(unaccepted) | INSUF / NONE | none | no | newest-unaccepted | none |
+| Cb8 | NONE | INSUF / NONE | none | no | no-evidence | none |
+
+**Blocking order** (reason reported when several apply): conflict > dev-absent > conflict-uncorroborated > future > newest-not-T > non-monotonic > malformed > fetch-head-malformed.
+
+Freshness only does three things:
+- selects K13 vs K14;
+- selects K23 vs K24;
+- sets `recommend` [B-17, B-19].
+
+**While G-F is CLOSED (the Revision 6 value), the only possible positive freshness evidence is R7, giving Cb5.**
+
+#### 1.6.6 Gate G-F (R6Δ)
+
+G-F is a constant of the specification. **Its Revision 6 value is CLOSED.** It may be set OPEN only in a later revision, and only after **all** of the following:
+1. UR-8 and UR-10 are verified by recorded fixtures (RT-06);
+2. UR-1 is measured and approved (RT-07);
+3. the owner approves P-08 and P-11;
+4. for `--all` forms, the owner also approves P-12.
+
+**While CLOSED:**
+- F18 is unreachable, and F22 replaces it;
+- Cb4 and Cb6 are unreachable;
+- **no FETCH_HEAD evidence can make `fresh=yes`.**
+
+Negative F evidence (F19–F21) is still evaluated, because it can only lower freshness. If a verification fixture disproves UR-8 or UR-10, G-F stays CLOSED permanently and the F18, Cb4 and Cb6 rows are removed in the next revision.
+
+#### 1.6.7 Unchanged-target fetch [B-13]
+
+| Case | Revision 6 behaviour |
+|---|---|
+| **S1:** whole fetch moved other refs; development unchanged | **Not fresh** (F22, G-F CLOSED). Freshness would be possible only after G-F opens. |
+| **S2:** whole fetch moved no ref | **Not fresh — UNRESOLVED (UR-2).** Diagnostic: `uncorroborated-no-reflog` |
+| **S3:** partial fetch or no-op pull | Not fresh |
+
+**Options to close S2** (owner decision; none is assumed):
+- (a) amend B-10/B-11 to admit FETCH_HEAD mtime as a file-level time when P4 and P6 hold;
+- (b) allow `ls-remote` over the network, with the helper's clock as the time;
+- (c) a separate fetch-recording mechanism (outside D1);
+- (d) accept the limitation. **(d) applies until the owner decides.**
+
+### 1.7 Patch identity and content
+
+#### 1.7.1 Claims
+
+- Patch-id equality = net-diff equivalence under the pinned diff.
+- Line containment = line presence, an upper bound.
+- Neither proves semantic equivalence, authorship, absence of reverts, or **that the whole change is intact** (R6Δ).
+
+#### 1.7.2 DIFF and pid (unchanged)
+
+```
+DIFF(A,B) := git --attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904 diff -U3 --no-relative
+             --no-ext-diff --no-textconv --no-color --binary --full-index --diff-algorithm=myers
+             --no-renames --ignore-submodules=none --submodule=short --src-prefix=a/ --dst-prefix=b/
+             -O/dev/null <A> <B>
+pid(A,B)  := DIFF(A,B) | git patch-id --verbatim
+```
+
+| patch-id output | Result |
+|---|---|
+| 0 lines | NULL |
+| Exactly one line `^[0-9a-f]{40} [0-9a-f]{40}$` | The first field |
+| Anything else | C11 |
+
+Open items: UR-4 (`patchid.stable`), UR-5 (`--attr-source`), UR-11 (hunkless diffs). [M] The output is sensitive to `GIT_DIFF_OPTS` and the `diff.*` keys; the environment and the pins neutralise that.
+
+#### 1.7.3 Candidate-unit content (R6Δ: `content_basis`)
+
+Content is computed per p ∈ paths(C), using only `ls-tree` and `cat-file blob`.
+
+- **⊥** marks an absent path.
+- **Opaque paths** are compared by OID only. A path is opaque when it is a gitlink, a symlink, or a blob with a NUL in its first 8,000 bytes in Pre or Post.
+- **Text lines:**
+  - split on `\n`; a non-empty final segment is a line;
+  - lines that are all-whitespace are dropped;
+  - comparison is byte-exact;
+  - X(L) is the count of line L in blob(X, p).
+
+States: Pre = parent0(C), Post = C, End = I.end, Tb = I.base, Tn = T.
+
+**Line counts** (per line L, summed over paths):
+
+| Quantity | Definition |
+|---|---|
+| A(L) — added | max(0, Post − Pre) |
+| R(L) — removed | max(0, Pre − Post) |
+| S_A — surviving additions | min(A, max(0, End − Pre)) |
+| S_R — surviving removals | min(R, max(0, Pre − End)) |
+| superseded | Σ(A − S_A) + Σ(R − S_R) + opaque paths with OID(End) ≠ OID(Post) |
+| k — additions present in T | Σ min(S_A, max(0, Tn − Tb)) |
+| K | ΣS_A |
+| j — removals still absent in T | Σ min(S_R, max(0, Tb − Tn)) |
+| J | ΣS_R |
+| B / b — opaque | B = opaque paths with OID(End) = OID(Post); b = members of B with OID(Tn) = OID(Post) |
+
+Mode-only changes contribute nothing.
+
+**Content state** (first match wins; threshold exactly k = K [B-18]):
+
+| # | Condition | State | content_basis |
+|---|---|---|---|
+| 1 | ΣA + ΣR + #opaque = 0 | unassessable | `-` |
+| 2 | K + J + B = 0 | superseded [P-06 · PDB: as stated] | `-` |
+| 3 | K > 0 | sufficient iff k = K ∧ b = B. **j/J is reported, not required.** | `added` |
+| 4 | K = 0, J > 0 | sufficient iff j = J ∧ b = B [P-07 · PDB: as stated] | `removed` |
+| 5 | otherwise | sufficient iff b = B | `opaque` |
+
+Insufficient → content-missing.
+
+**Consumer consequence (R5-04):** under state 3, MERGED is compatible with j < J, meaning some lines this commit removed are present again. §1.10 makes this visible. Whether to strengthen the rule is **UR-14**.
+
+### 1.8 Integration algorithm
+
+#### 1.8.1 Present C (C ⊑ T) — unchanged
+
+```
+if np(C) ≥ 3:                                  K02   [P-16 · PDB: K02]
+P := oldest X ∈ FP with C ⊑ X                  (binary search; monotone along FP)
+if P = C:      I := (ancestry-direct, base=parent0(C), tip=C, end=C, integrating=C, merge=-, anchor=C)
+elif np(P) ≥ 3:                                K05
+elif np(P) = 2:
+     require C ⊑ P^2 ∧ C ⋢ P^1                 else raise C12
+     I := (ancestry-merge, base=P^1, tip=P, end=P^2, integrating=P, merge=P, anchor=C)
+else:          raise C12
+→ FINALIZE(I)
+```
+
+**How each predicate reads:**
+- **P = C:** C is on the first-parent chain.
+- **P ≠ C:** C entered through P^2.
+- **K05:** present(C) ∧ P ≠ C ∧ np(P) ≥ 3.
+- **Direct ancestry never decides on its own:** FINALIZE must still pass.
+- **Squash evidence:** required iff ¬present(C).
+- **Rows K06–K12** apply only when ¬present(C). Every path out of this block ends in K02, K05, C12 or FINALIZE.
+
+#### 1.8.2 Absent C (C ⋢ T) — R6Δ (R5-01, P-04 PDB)
+
+| Row | Condition | Result |
+|---|---|---|
+| K03 | np(C) ≥ 2 | unsupported-merge-input |
+| K04 | np(C) ≤ 1 ∧ paths(C) = ∅ | empty-commit |
+| K06 | NB := `merge-base --all C T`, \|NB\| = 0 | no-common-history |
+| K07 | \|NB\| > 1 | multiple-merge-bases |
+
+**M1 (refs and endpoints):**
+- `refs` := `for-each-ref --contains C refs/remotes/origin/`, minus `refs/remotes/origin/{development,HEAD}` [P-04 · **PDB: remote-tracking refs only**]. If P-04 is adopted, `refs/heads/` is added.
+- `E := rev-list C <refs…> --not T`.
+- ord(X) = rank of X in the helper's own topological order of E (Kahn's algorithm; OID ascending breaks ties).
+
+**K08:** any X ∈ E with |merge-base --all X T| > 1 → K08 [P-02 · PDB: K08]. A count of 0 → C12.
+
+**M2 (target-side candidates):**
+- RANGE := `rev-list T --not NB`.
+- SSHAPE := the GitLab pairs (S, M) with M ∈ FP ∩ RANGE.
+- SOTHER := the non-merge commits of RANGE that are not an S in SSHAPE.
+- PMAP_S and PMAP_O map pid → pairs ordered by pos(M), and pid → commits ordered by OID. NULL pids are dropped.
+
+**M3–M4 (first-integration matches):**
+- p := pid(B_X, X) for each X ∈ E.
+- A pair with that pid is kept iff B_X ⊑ S^1 and the pair predicates hold. Kept matches form V, with base = B_X.
+- Shape hits come from PMAP_O.
+
+**M5 (chaining):**
+- For X2 ∈ E in order, consider each v ∈ V with X_v ⊑ X2 and X_v ≠ X2, in descending (pos(M_v), ord(X_v)).
+- p := pid(X_v, X2). Accept (S2, M2) ∈ PMAP_S[p] iff all three hold:
+  - M_v ⊑ S2^1;
+  - pos(M2) > pos(M_v);
+  - no v′ ∈ V has X_v′ ⊑ X2, M_v′ ⊑ S2^1 and a greater (pos(M_v′), ord(X_v′)).
+- An accepted pair adds the match (X2, base = X_v, S2, M2) to V.
+
+**M6 (covering):** covering := {v : C ⊑ X_v ∧ C ⋢ base_v}.
+
+**M7 (selection), R6Δ.** Every match v gets a **base rank**:
+- brank(v) = 0 when base_v ∉ E. Every first-integration base is a merge base, which is reachable from T and therefore excluded from E.
+- brank(v) = 1 + ord(base_v) when base_v ∈ E. Every chained base is a prior endpoint.
+
+The winner m* is the covering match that minimises the tuple
+
+**(pos(M), −brank(base), ord(X), OID(base), OID(S))**
+
+**Why this is total [R].**
+- Every component is defined for every match:
+  - pos(M) because M ∈ FP;
+  - brank by the definition above;
+  - ord(X) because X ∈ E;
+  - OIDs always.
+- Two distinct matches cannot agree on all five components. S is determined by M (S = M^2), so equal (M, X, base) means the same match.
+
+**What the order means:**
+- earliest integration first;
+- then the latest segment base (a chained base beats a first-integration merge base);
+- then the earliest endpoint;
+- then OIDs.
+
+**Result:** I := (squash, base = S^1, tip = M, end = X, integrating = S, merge = M, segment = (base, X), anchor = S), with `covering = |covering|`. This is branch point **K09**.
+
+**No covering match:**
+
+| Row | Condition | Result |
+|---|---|---|
+| K10 | a shape hit covers C | unsupported-integration-shape [B-14] |
+| K11 | refs = ∅ | unreachable |
+| K12 | cand ≠ ∅ | touched-without-equivalent |
+| K13 / K14 | otherwise (LIVE candidate) | LIVE / STALE_REFERENCE |
+
+cand := `rev-list --no-merges --full-history T --not NB -- paths(C)` ∪ {merges G ∈ RANGE with non-empty `diff-tree --cc` output on paths(C)} \ {S_v, M_v : v ∈ V}.
+
+#### 1.8.3 FINALIZE
+
+FINALIZE computes EV (§6), PR and CK first, then decides K15–K24 in order. A failure while computing any of them raises the corresponding C row.
+
+- **PR:** count of p ∈ paths(C) with blob(I.base) ≠ blob(I.tip) and blob(T) = blob(I.base), compared by OID with ⊥ distinct. Reported as `paths_reverted = n/N`.
+- **Diagnostics:**
+  - `drift`: paths with T ≠ End;
+  - `later_commits`;
+  - `c_paths_in_unit`.
+
+#### 1.8.4 Evidence table (unchanged)
+
+| via | base | tip | end | anchor | attribution |
+|---|---|---|---|---|---|
+| ancestry-direct | parent0(C) | C | C | C | graph |
+| ancestry-merge | P^1 | P | P^2 | C | graph |
+| squash | S^1 | M | X | S | content-equivalent; never names an MR or author |
+
+### 1.9 Outcomes (unchanged)
+
+| Outcome | Meaning |
+|---|---|
+| MERGED | Historical integration detected; no exact revert detected [B-08]. Not presence, intactness, deployment or completion. |
+| LIVE | No supported integration and no foreign edit since NB; target is fresh. |
+| STALE_REFERENCE | As LIVE, but the target is stale or unknown. |
+| GONE | Object absent locally. |
+| AMBIGUOUS(reason) | Classification refused. |
+| TOOL_FAILURE(code) | Execution failure. |
+
+### 1.10 Recommendation and consumer caveats — R6Δ (R5-04)
+
+| Result | recommend | Fixed wording |
+|---|---|---|
+| MERGED, fresh=yes | yes | "Integrated into origin/development (observed <observed_at>, fresh); no exact revert detected; presence, deployment and completion are not established." [P-18 · PDB: this text] |
+| MERGED, fresh=no, observed_at ≠ none | historical | **"Integrated as observed at <timestamp>; target is stale; later reverts are not verified."** [B-09] |
+| MERGED, observed_at = none | no | report only [B-19] |
+| LIVE | yes | "No integration of this commit found in origin/development as observed at <observed_at> (fresh); this does not establish that the work is unfinished, wanted, or undeployed." [P-18 · PDB: this text] |
+| AMBIGUOUS, STALE_REFERENCE, GONE | no | report only; at most "Fetch, then re-run?" [B-17] |
+| TOOL_FAILURE | (no field) | "merge-status failed: <code>" |
+
+**Mandatory caveats (R6Δ, normative requirement; wording [P-21 · PDB: this text]).** Observe prints these after the sentence above and never merges them into it. The binding sentence B-09 stays verbatim.
+
+| ID | When | Text |
+|---|---|---|
+| CV-1 | every MERGED line with `content_basis=added` | "Content check covers this commit's added lines; lines it removed are reported (removed_lines_absent=j/J), not required." |
+| CV-2 | additionally, when j < J | "<J−j> line(s) this commit removed are present again in the target; the change may not be intact." |
+| CV-3 | every MERGED line with `superseded>0` | "<n> of this commit's changes were replaced on its own branch before integration." |
+| CV-4 | every line whose `snapshot` ≠ `full` | "Repository state was not fully compared (snapshot=<value>); stability is not established." |
+
+No outcome authorises a write, an `ev:` line, a status move, a NEXT change or a commit.
+
+### 1.11 Output grammar (ABNF) — R6Δ
+
+```
+line        = classified / failure
+classified  = "outcome=" OUTCOME SP "reason=" (REASON / "-") SP "trace=" KTRACE
+              SP "fresh=" ("yes" / "no") SP "observed_at=" (TS / "none")
+              SP "freshness_source=" ("reflog" / "fetch_head" / "both" / "none")
+              SP "freshness_trace=" RROW "/" FROW "/" CBROW
+              SP "freshness_reason=" FREASON SP "fetch_head=" FHSTAT
+              SP "commit=" HEX40 SP "via=" (VIA / "-") SP "attribution=" (ATTR / "-")
+              SP "integrating=" (HEX40 / "-") SP "merge=" (HEX40 / "-")
+              SP "segment_base=" (HEX40 / "-") SP "segment_end=" (HEX40 / "-")
+              SP "covering=" (NUM / "-") SP "refs=" (REFLIST / "-") SP "events=" (NUM / "-")
+              SP "paths_reverted=" (FRAC / "-") SP "added_lines_present=" (FRAC / "-")
+              SP "removed_lines_absent=" (FRAC / "-") SP "binary_present=" (FRAC / "-")
+              SP "content_basis=" (BASIS / "-")
+              SP "superseded=" (NUM / "-") SP "drift=" (FRAC / "-")
+              SP "later_commits=" (NUM / "-") SP "c_paths_in_unit=" (FRAC / "-")
+              SP "snapshot=full"
+              SP "recommend=" ("yes" / "historical" / "no") LF
+failure     = "outcome=TOOL_FAILURE" SP "code=" CODE SP "trace=" XTRACE
+              SP "provisional=" (PTRACE / "-") SP "snapshot=" SNAP LF
+OUTCOME  = "MERGED" / "LIVE" / "AMBIGUOUS" / "STALE_REFERENCE" / "GONE"
+REASON   = "unsupported-merge-input" / "empty-commit" / "unsupported-integration-shape"
+         / "no-common-history" / "multiple-merge-bases" / "revert-undeterminable"
+         / "revert-unordered" / "incomparable-events" / "reverted-after" / "path-reverted"
+         / "content-unassessable" / "superseded-in-branch" / "content-missing" / "unreachable"
+         / "touched-without-equivalent"
+CODE     = "bad-input" / "integrity-refused" / "unsafe-ownership" / "snapshot-unreadable-initial"
+         / "unsupported-version" / "preflight" / "object-format" / "config-refused"
+         / "target-missing" / "symbolic-target" / "limit" / "timeout" / "git-error" / "patch-id"
+         / "graph-inconsistent" / "io" / "internal" / "snapshot-unreadable-final"
+         / "snapshot-changed"
+KTRACE   = "K01"/"K02"/"K03"/"K04"/"K05"/"K06"/"K07"/"K08"/"K10"/"K11"/"K12"/"K13"/"K14"
+         / "K15"/"K16"/"K17"/"K18"/"K19"/"K20"/"K21"/"K22"/"K23"/"K24"
+XTRACE   = "A01"/"A02"/"A03"/"A04"/"A05"/"B01"/"C01"/"C02"/"C03"/"C04"/"C05"/"C06"/"C07"
+         / "C08"/"C09"/"C10"/"C11"/"C12"/"C13"/"C14"/"C15"/"D01"/"D02"
+PTRACE   = KTRACE / "C01"/"C02"/"C03"/"C04"/"C05"/"C06"/"C07"/"C08"/"C09"/"C10"/"C11"/"C12"
+         / "C13"/"C14"/"C15"
+RROW     = "R1"/"R2"/"R3"/"R4"/"R5"/"R6"/"R7"
+FROW     = "F01"/"F02"/"F03"/"F04"/"F05"/"F06"/"F07"/"F08"/"F09"/"F10"/"F11"/"F12"/"F13"
+         / "F14"/"F15"/"F16"/"F17"/"F18"/"F19"/"F20"/"F21"/"F22"
+CBROW    = "Cb1"/"Cb2"/"Cb3"/"Cb4"/"Cb5"/"Cb6"/"Cb7"/"Cb8"
+FREASON  = "ok"/"stale"/"no-evidence"/"newest-unaccepted"/"conflict"/"dev-absent"
+         / "conflict-uncorroborated"/"future"/"newest-not-T"/"non-monotonic"/"malformed"
+         / "fetch-head-malformed"
+FHSTAT   = "none"/"malformed"/"future"/"inadmissible-insteadof"/"inadmissible-remote-url"
+         / "uncorroborated-refspec"/"uncorroborated-reflog-malformed"
+         / "uncorroborated-no-fetch-event"/"uncorroborated-multiple-fetch-events"
+         / "uncorroborated-not-whole-fetch"/"uncorroborated-multi-remote"
+         / "uncorroborated-foreign-lines"/"uncorroborated-duplicate-lines"
+         / "uncorroborated-no-link"/"uncorroborated-incomplete"/"uncorroborated-window"
+         / "uncorroborated-no-reflog"/"unverified-association"/"ok"/"negative-conflict"
+         / "negative-dev-absent"/"negative-conflict-uncorroborated"
+VIA      = "ancestry-direct" / "ancestry-merge" / "squash"
+ATTR     = "graph" / "content-equivalent"
+BASIS    = "added" / "removed" / "opaque"
+SNAP     = "full" / "files-only" / "none" / "final-unreadable"
+TS       = 4DIGIT "-" 2DIGIT "-" 2DIGIT "T" 2DIGIT ":" 2DIGIT ":" 2DIGIT "Z"
+HEX40    = 40HEXL
+HEXL     = DIGIT / %x61-66
+NUM      = "0" / (%x31-39 *DIGIT)
+FRAC     = NUM "/" NUM
+REFLIST  = REFID *("," REFID)
+REFID    = 1*24(ALPHA / DIGIT / "." / "_" / "/" / "-" / "?")
+```
+
+**Presence rules.** Any field not listed for a row is `-`. Every classified line has `snapshot=full` (invariant I-1).
+
+| Trace | Non-`-` fields |
+|---|---|
+| K01–K08 | freshness fields; `recommend=no` |
+| K10–K12 | freshness fields plus `refs` (`-` if empty) |
+| K13, K14 | freshness fields plus `refs` |
+| K15 | freshness fields; via, attribution, integrating, merge; segment_* and covering (squash only); all content fields from `paths_reverted` to `c_paths_in_unit`. `content_basis` is `-` unless the content state is 3–5. `events` is `-`. |
+| K16–K24 | as K15, plus `events` |
+
+**Failure lines:** `provisional` is set only on D01 and D02. `snapshot` values follow §1.5.
+
+**Other output rules:**
+- REFID sanitising: any character outside `[A-Za-z0-9._/-]` becomes `?`; at most 24 characters; sorted.
+- Never printed: paths, commit text, stderr, raw input.
+- Exit code 0 for classified lines, 2 for failure lines.
+
+### 1.12 Limits (→ C08) [P-19 · PDB: as listed]
+
+| Item | Limit |
+|---|---|
+| FP | 20,000 |
+| RANGE | 5,000 |
+| E | 2,000 |
+| SSHAPE | 2,000 |
+| pid computations | 20,000 |
+| revert candidates | 5,000 |
+| paths(C) | 5,000 |
+| blob | 8 MiB |
+| per-call stdout | 64 MiB |
+| total runtime | 300 s |
+
+### 1.13 Known limitations — R6Δ
+
+| ID | Limitation |
+|---|---|
+| L-1 | S1, S2 and S3 cannot establish freshness while G-F is CLOSED. S2 cannot even with G-F OPEN. |
+| L-2 | Snapshot residuals (§1.5); `files-only` comparisons |
+| L-3 | Non-exact reverts are not detected |
+| L-4 | Line presence is an upper bound |
+| L-5 | Content equivalence is not attribution |
+| L-6 | Fast-forward squash, rebase/semi-linear, cherry-pick-then-merge and octopus histories are unsupported → AMBIGUOUS |
+| L-7 | Forgery is out of scope |
+| L-8 | The refspec in force at fetch time is unknown |
+| L-9 | `--no-write-fetch-head` residual (relevant only if G-F opens) |
+| L-10 | The remote was observed up to one fetch duration before ts |
+| L-11 | The config denylist cannot cover future keys |
+| L-12 (R6Δ) | A mixed add/remove commit can be MERGED with j < J. It is surfaced by CV-1 and CV-2, not prevented (UR-14). |
+| L-13 (R6Δ) | Under P-04's PDB, commits reachable only from local branches are AMBIGUOUS(unreachable) |
+
+---
+
+## 2. Decision register — R6Δ (R5-07)
+
+**BINDING.** These are unchanged from Revision 5. They come from the owner's own words.
+
+| ID | Decision |
+|---|---|
+| B-01 | D1 only |
+| B-02 | Helper plus isolated fixtures |
+| B-03 | 24 h |
+| B-04 | Six-outcome vocabulary |
+| B-05 | Documentation corrections in scope (in the implementation phase) |
+| B-06 | `projects.md` is protected |
+| B-07 | GOAL-11 deferred |
+| B-08 | MERGED meaning |
+| B-09 | Exact stale wording |
+| B-10 | observed_at comes from reflog only |
+| B-11 | mtime is never a line timestamp |
+| B-12 | A corroborated mismatching dev SHA is negative |
+| B-13 | Unchanged-target fetch only when the evidence genuinely supports it |
+| B-14 | Unsupported histories are never MERGED (fast-forward squash fails closed) |
+| B-15 | A PASS ≠ implementation |
+| B-16 | Implementation and commit are separate authorisations |
+| B-17 | AMBIGUOUS never recommends |
+| B-18 | Exact k = K kept provisionally; not weakened |
+| B-19 | Stale MERGED recommends only with a trustworthy observed_at |
+
+**PROPOSED.** Each has a pre-decision behaviour (PDB). The PDB is normative now.
+
+| ID | Proposal | PDB (in force until decided) | Fail-closed basis |
+|---|---|---|---|
+| P-01 | Uncorroborated dev ≠ T is negative (F21) | As proposed (NEG) | Can only lower freshness |
+| P-02 | Endpoint multi-base blocks (K08) | As proposed | AMBIGUOUS |
+| P-04 | Local `refs/heads/*` as endpoint sources | **Excluded** (remote-tracking only) | Unreachable becomes AMBIGUOUS, never LIVE/MERGED via local-only lineage |
+| P-05 | New TF codes and the `snapshot-changed` name | As proposed | Naming only |
+| P-06 | Surviving-K and the superseded state | As proposed | AMBIGUOUS |
+| P-07 | Removal-only baseline | As proposed | AMBIGUOUS |
+| P-08 | Association checks P1–P7 and WF | As proposed for corroboration; the positive path is behind G-F | No positive F evidence |
+| P-09 | Strictly newer F-POS replaces an unaccepted entry | Unreachable (G-F CLOSED) | — |
+| P-10 | Corroborated, no dev line → NEG | As proposed | Lowers freshness only |
+| P-11 | Two-sided window | As proposed | Stricter |
+| P-12 | `--all` forms with a single remote | **Excluded** from WF | Fewer corroborations |
+| P-13 | Revert lineage rule (K16) | As proposed | AMBIGUOUS |
+| P-14 | Carrier deduplication D1/D2 | **No deduplication** | More events, more chance of K17; same final kind |
+| P-15 | Order immaterial when all events have the same kind | **Total order always required** | More K17 (AMBIGUOUS) |
+| P-16 | Present octopus C → K02 | As proposed | AMBIGUOUS |
+| P-17 | ctime and inode in the snapshot | As proposed | More D02 |
+| P-18 | Wording for fresh MERGED and for LIVE | The §1.10 texts | Presentation only; both disclaim |
+| P-19 | Numeric limits | As listed | TF |
+| P-20 | `update by push` accepted | **Not accepted** (R6) | Fewer positives |
+| P-21 (R6Δ) | Caveat wording CV-1 … CV-4 | The §1.10 texts | Presentation only; the caveats themselves are required |
+
+**UNRESOLVED**
+
+| ID | Item | Closes when |
+|---|---|---|
+| UR-1 | W value | RT-07 plus owner approval |
+| UR-2 | S2 freshness (options a–d) | Owner decision |
+| UR-3 | Final k = K threshold | Owner decision after real cases |
+| UR-4 | `patchid.stable` vs `--verbatim` | RT-06 |
+| UR-5 | `--attr-source` behaviour | RT-06 |
+| UR-6 | U4–U8 git behaviours | RT-06 |
+| UR-7 | FETCH_HEAD write order | RT-07 |
+| UR-8 | Reflog cmdline strings; `--all` append behaviour | RT-06 |
+| UR-9 | A no-op fetch writes no reflog | RT-06 |
+| UR-10 | Truncate-and-complete FETCH_HEAD | RT-06 |
+| UR-11 | Hunkless patch-id | RT-06 |
+| UR-12 | ctime semantics | RT-06 |
+| UR-13 | A separate Observe signal for `superseded>0` | Owner |
+| UR-14 (R6Δ) | Mixed add/remove partial revert (L-12) | Owner decision (see below) |
+| UR-15 (R6Δ) | Opening gate G-F (§1.6.6) | UR-1, UR-8, UR-10 plus owner approval of P-08, P-11 (and P-12) |
+
+**UR-14 alternatives.** None is selected.
+- **(a)** Keep the Revision 6 behaviour: MERGED, made visible by CV-1 and CV-2.
+- **(b)** Add `j = J` to content state 3. This is stricter, but more true merges become AMBIGUOUS(content-missing), for example when a common line reappears elsewhere.
+- **(c)** Keep MERGED, but force `recommend=no` when j < J. This changes the §1.10 table.
+
+(a) is the current text because it changes no owner decision. (b) and (c) are owner choices.
+
+---
+
+## 3. Precedence table (authoritative; §4 implements it) — R6Δ
+
+**Evaluation order:** A, then B, then provisional (C or K), then D.
+
+| Row | Ph | Condition | Result | snapshot | Fixtures (status) |
+|---|---|---|---|---|---|
+| A01 | A | C syntax | TF bad-input | none | FX-A01 (B) |
+| A02 | A | `--repo` rules | TF bad-input | none | FX-A02 (B) |
+| A03 | A | not a real directory | TF integrity-refused | none | FX-A03 (B) |
+| A04 | A | ownership | TF unsafe-ownership | none | FX-A04 (B) |
+| **A05** | A | invalid `--now` | TF bad-input | none | FX-A05a–d (B) |
+| B01 | B | initial snapshot unreadable | TF snapshot-unreadable-initial | none | FX-B01a–c (B) |
+| C01–C07 | C | §1.4 | TF per row | files-only (D00) | FX-C01–C07, FX-S9a (B) |
+| C08 | C | limit | TF limit | full or files-only | FX-C08a–j (PENDING P-19) |
+| C09 | C | timeout | TF timeout | full | FX-C09 (B) |
+| C10 | C | git error | TF git-error | full or files-only | FX-C10, FX-S9b (B) |
+| C11 | C | patch-id shape | TF patch-id | full | FX-C11 (B) |
+| C12 | C | graph inconsistent | TF graph-inconsistent | full | FX-C12 (B) |
+| C13 | C | io | TF io | full | FX-C13 (B) |
+| C14 | C | other exception, or a violation of I-1 | TF internal | full or files-only | FX-C14, FX-S1, FX-S10 (B) |
+| C15 | C | not a commit | TF bad-input | full | FX-C15 (B) |
+| K01 | C | C missing | GONE | full | FX-K01 (B) |
+| K02 | C | np(C) ≥ 3 | AMB unsupported-merge-input | full | FX-K02b (B); FX-K02a (P-16) |
+| K03 | C | np = 2 ∧ ¬present | AMB unsupported-merge-input | full | FX-K03 (B) |
+| K04 | C | np ≤ 1 ∧ ¬present ∧ no paths | AMB empty-commit | full | FX-K04 (B) |
+| K05 | C | present ∧ P ≠ C ∧ np(P) ≥ 3 | AMB unsupported-integration-shape | full | FX-K05 (B) |
+| K06 | C | NB = ∅ | AMB no-common-history | full | FX-K06 (B) |
+| K07 | C | \|NB\| > 1 | AMB multiple-merge-bases | full | FX-K07 (B) |
+| K08 | C | endpoint multi-base | AMB multiple-merge-bases | full | FX-K08 (P-02) |
+| K09 | C | covering ≠ ∅ → FINALIZE (not terminal) | — | — | — |
+| K10 | C | shape hit covers C | AMB unsupported-integration-shape | full | FX-K10a,b (B) |
+| K11 | C | refs = ∅ | AMB unreachable | full | FX-K11a,b (B); FX-K11c (P-04) |
+| K12 | C | cand ≠ ∅ | AMB touched-without-equivalent | full | FX-K12a–g,i,j (B); h (UR-4) |
+| K13 | C | LIVE ∧ fresh | LIVE | full | FX-K13a–d (B) |
+| K14 | C | LIVE ∧ ¬fresh | STALE_REFERENCE | full | FX-K14a (B); K14b (B) |
+| K15 | F | no pids | AMB revert-undeterminable | full | FX-K15 (UR-11) |
+| K16 | F | revert outside lineage | AMB revert-unordered | full | FX-K16 (P-13) |
+| K17 | F | not totally ordered (PDB: any kinds) | AMB incomparable-events | full | FX-K17 (B); FX-K17b (P-15) |
+| K18 | F | final event is a revert | AMB reverted-after | full | FX-K18a,d,e,f (B); b,c (P-14) |
+| K19 | F | paths reverted | AMB path-reverted | full | FX-K19 (B) |
+| K20 | F | unassessable | AMB content-unassessable | full | FX-K20a,b (B) |
+| K21 | F | superseded | AMB superseded-in-branch | full | FX-K21a,b (P-06) |
+| K22 | F | insufficient | AMB content-missing | full | FX-K22a,b,c,e,f,g (B); d (P-07) |
+| K23 | F | fresh | MERGED | full | FX-K23 variants (§7) |
+| K24 | F | not fresh | MERGED | full | FX-K24a,b,c (B) |
+| D01 | D | final snapshot unreadable | TF snapshot-unreadable-final | final-unreadable | FX-S2 (B) |
+| D02 | D | snapshots differ | TF snapshot-changed | full or files-only | FX-S3–S6, S8 (B); S7 (UR-12, P-17); S9c (B) |
+| D00 | D | snapshots equal | provisional result stands | (provisional's value) | every non-S fixture |
+
+**Notes:**
+- A C row preempts any K row not yet reached. In FINALIZE, a C row raised while computing EV, PR or CK preempts K15–K24.
+- **Conditional-only coverage** (no BINDING fixture): C08, K08, K15, K16, K21. These rows are covered on paper only conditionally (§8 PV-01).
+
+---
+
+## 4. Pseudocode — R6Δ
+
+```
+main(argv):
+  r := phaseA(argv)                                  # A01–A05 (A05: --now parse, §1.2)
+  if r is failure: emit(r with snapshot=none); exit 2
+
+  try:    S0f := snap_files()
+  except SnapshotError: emit(TF(snapshot-unreadable-initial, B01, provisional="-", snapshot=none)); exit 2
+
+  S0r := NONE; prov := NONE
+  try:
+      prov := phaseC(S0f)                            # sets S0r after preflight
+  except HelperFailure as f: prov := TF(f.code, f.trace)
+  except BaseException:      prov := TF(internal, C14)
+
+  if prov is K-result and S0r = NONE:                # invariant I-1 (unreachable by construction)
+      prov := TF(internal, C14)
+  scope := "full" if S0r ≠ NONE else "files-only"
+
+  try:
+      S1f := snap_files()
+      S1r := snap_refs() if S0r ≠ NONE else NONE
+  except BaseException:
+      final := TF(snapshot-unreadable-final, D01, provisional=prov.trace, snapshot=final-unreadable)
+  else:
+      if S1f ≠ S0f or (S0r ≠ NONE and S1r ≠ S0r):
+          final := TF(snapshot-changed, D02, provisional=prov.trace, snapshot=scope)
+      else:
+          final := prov with snapshot=scope                       # D00; I-2: scope=files-only only for C rows
+  final.recommend := recommend(final)                             # §1.10; none for TF
+  emit(final); exit (2 if final is TF else 0)
+
+phaseC(S0f):
+  preflight()                                         # C01–C05
+  T := resolve_target()                               # C06, C07
+  S0r := snap_refs()                                  # failure → C10
+  FR := freshness(S0f, S0r, T, now, GF=CLOSED)        # §1.6; F18 unreachable, F22 instead
+  return decide(C, T, FR)
+
+decide(C, T, FR):
+  if not cat-file -e C:              return K01
+  if cat-file -t C ≠ commit:         raise C15
+  if np(C) ≥ 3:                      return K02
+  if C ⊑ T:
+      P := oldest_fp_container(C)
+      if P = C:                      I := direct(C)
+      elif np(P) ≥ 3:                return K05
+      elif np(P) = 2:
+          if not (C ⊑ P^2 and C ⋢ P^1): raise C12
+          I := via_merge(P)
+      else:                          raise C12
+      return finalize(I, FR)
+  if np(C) = 2:                      return K03
+  if paths(C) = ∅:                   return K04
+  NB := merge-base --all C T
+  if |NB| = 0:                       return K06
+  if |NB| > 1:                       return K07
+  refs, E := M1(C, T)                                 # PDB P-04: refs/remotes/origin/ only
+  for X in E:
+      n := |merge-base --all X T|
+      if n > 1:                      return K08
+      if n = 0:                      raise C12
+  M2(); V, hits := M3_M4(E); V := M5(E, V)
+  covering := M6(V)
+  if covering ≠ ∅:                   return finalize(M7(covering), FR)   # K09; M7 tuple §1.8.2
+  if covers(hits, C):                return K10
+  if refs = ∅:                       return K11
+  if cand(C, NB, V) ≠ ∅:             return K12
+  return K13 if FR.fresh = yes else K14
+
+finalize(I, FR):
+  EV := events(I)          # §6 under PDB P-13/P-14/P-15
+  PR := paths_reverted(I)
+  CK := content(I)         # sets content_basis
+  if EV = UNDETERMINABLE:            return K15
+  if EV = UNORDERED:                 return K16
+  if EV = INCOMPARABLE:              return K17
+  if EV.kind_final = revert:         return K18
+  if PR > 0:                         return K19
+  if CK = unassessable:              return K20
+  if CK = superseded:                return K21
+  if CK = insufficient:              return K22
+  return K23 if FR.fresh = yes else K24
+```
+
+- Every `return`/`raise` maps to exactly one §3 row, and every terminal §3 row is reached by exactly one path.
+- No exception can escape `main` after phase A.
+
+---
+
+## 5. Freshness evidence matrix — R6Δ
+
+All fixtures use the integration baseline of FX-K23a, so the outcome is MERGED and the freshness fields drive `recommend`.
+
+**R rows**
+
+| Row | Evidence | Absent / conflicting | Class | Fixtures | Status |
+|---|---|---|---|---|---|
+| R1 | — | TR absent | NONE | FX-R1 | B |
+| R2 | malformed line | — | CONTRA | FX-R2 | B |
+| R3 | earlier ts > last | — | CONTRA | FX-R3 | B |
+| R4 | last new ≠ T | moved without a log entry | CONTRA | FX-R4 | B |
+| R5 | last ts > now | — | CONTRA | FX-R5, FX-A05d | B |
+| R6 | unaccepted newest | — | INSUF | FX-R6a,b | B; FX-R7c interim (P-20) |
+| R7 | accepted newest = T | — | POS | FX-R7a,b,d,e,f | B; R7c if adopted (P-20) |
+
+**F rows**
+
+| Row | Fixtures | Status |
+|---|---|---|
+| F01 | FX-R7a | B |
+| F02 | FX-F02 | B |
+| F03 | FX-F03 | B |
+| F04 | FX-F04 | B |
+| F05 | FX-F05 | B |
+| F06 | FX-F06 | B |
+| F07 | FX-F07 | B |
+| F08 | FX-F08 | B |
+| F09 | FX-F09 | B |
+| F10 | FX-F10, FX-Cb6b | P-08 |
+| F11 | FX-F11a,b,c, FX-F12b interim, FX-F-STALE-a | P-08 (F12b also P-12) |
+| F12 | FX-F12a | Reachable only if P-12 is adopted; interim: F11 |
+| F13 | FX-F13 | P-08 |
+| F14 | FX-F14a,b | P-08 |
+| F15 | FX-F15, FX-F-STALE-d | P-08 |
+| F16 | FX-F16a,b, FX-F-STALE-b | P-08 |
+| F17 | FX-F17a,b,c | P-11, UR-1 |
+| F17 + `-no-reflog` | FX-F17d (S2) | B |
+| F18 | FX-F18a,b, FX-Cb6 (if-open) | GATED (G-F); unreachable in Revision 6 |
+| **F22** | FX-F18a, F18b, Cb6, F-STALE-c (interim) | P-08 (F22 needs corroboration; the gate rule itself is binding-compatible) |
+| F19 | FX-F19, FX-K14b, FX-K24c | P-08 (corroboration) — **see note** |
+| F20 | FX-F20 | P-10, P-08 |
+| F21 | FX-F21 | P-01 |
+
+**Note on F19 vs F21.** Under any decision on P-08 and P-01, a dev line ≠ T yields NEG: F19 when corroborated, F21 when not. So FX-F19, FX-K14b and FX-K24c have **BINDING outcome fields** (`fresh=no`, `observed_at=none`, recommend). Only the `freshness_reason` and `fetch_head` tokens are PENDING(P-08).
+
+**Cb rows**
+
+| Row | Fixtures | Status |
+|---|---|---|
+| Cb1 | FX-F19, F20, F21 | per row |
+| Cb2 | FX-R2–R5 | B |
+| Cb3 | FX-F02, F03, F08 | B |
+| Cb4 | FX-F18a (if-open) | GATED; unreachable |
+| Cb5 | FX-R7a,b,d,e,f, FX-F04, FX-F18a interim, F-STALE-* | B / per row |
+| Cb6 | FX-F18b, FX-Cb6 (if-open) | GATED; unreachable |
+| Cb7 | FX-R6a,b, FX-Cb6 interim, FX-Cb6b | B / per row |
+| Cb8 | FX-R1, FX-F18b interim | B |
+
+**Other failure sources:**
+- Unreadable or oversized evidence files → B01 or D01.
+- A missing target → C06.
+- Unsupported git or config → C01–C05.
+- Invalid `--now` → A05.
+
+---
+
+## 6. Revert and event-ordering specification — R6Δ (PDBs)
+
+**6.1 Patches.** Each patch-id is separately computed; none is derived from another.
+
+| Name | Diff |
+|---|---|
+| u_I | DIFF(I.base, I.tip) |
+| u_C | DIFF(parent0(C), C) |
+| r_I | DIFF(I.tip, I.base) |
+| r_C | DIFF(C, parent0(C)) |
+
+- U := {u_I, u_C} \ {NULL}; Rv := {r_I, r_C} \ {NULL}.
+- **K15** when U ∪ Rv = ∅.
+- A mode-only C inside a larger unit is handled by K20.
+
+**6.2 Candidate records.** For each E in `rev-list T --not I.tip` (at most 5,000, else C08):
+- e := pid(parent0(E), E) when np(E) ≤ 1, else pid(E^1, E).
+- A root commit uses the empty tree. An octopus uses its first-parent view.
+- A NULL e means E is not a record. A pid failure raises C11.
+- **revert** iff e ∈ Rv; **reapply** iff e ∈ U. These are mutually exclusive.
+- **Comparison:** exact equality of 40-hex patch-ids under `--verbatim`. Line-number offsets are ignored; paths, hunks and context lines must match.
+
+**6.3 Lineage [P-13 · PDB: as stated].**
+- A record qualifies iff I.anchor ⊑ E (anchor = C for the ancestry modes, S for squash).
+- A revert record with anchor ⋢ E → **K16**.
+- A reapply record with anchor ⋢ E stays an event.
+
+**6.4 Identity and deduplication [P-14 · PDB: no deduplication].**
+- Event = (rep, kind). Under the PDB, **every record is its own event**, with rep = its own commit.
+- If P-14 is adopted, exactly two collapses apply:
+  - **D1:** a GitLab pair in which both records have the same kind and the same e → one event, rep = E_S.
+  - **D2:** a `--no-ff` merge carrier with exactly one same-kind, same-e record inside E_M^2 \ E_M^1, and no other record there → one event, rep = E_X.
+- Nothing else ever collapses events (shared pid, integration point, timestamp or branch).
+
+**6.5 Ordering [P-15 · PDB: total order always required].**
+- e₁ precedes e₂ iff rep(e₁) ⊑ rep(e₂) and rep(e₁) ≠ rep(e₂). Timestamps are never used.
+- **PDB:** the events must form a total order, whatever their kinds; otherwise **K17**.
+- If P-15 is adopted: events of the same kind are not required to be ordered (all reverts → K18, all reapplies → continue); mixed kinds must be totally ordered, otherwise K17.
+- The final kind is the kind of the maximal event.
+
+**6.6 Decision order.** K15 → K16 → K17 → K18 → K19. A final reapply never yields MERGED by itself.
+
+**6.7 Detection boundary.**
+
+| Situation | Result |
+|---|---|
+| Exact full revert of IU or CU, incl. `revert -m 1` | **Detected** → K18 |
+| Exact revert, then exact reapply, totally ordered | Continues to the content check |
+| An unrelated change identical to the inverse | Treated as a revert → K18 |
+| Partial revert | Not an event. Backstops: K19, or K22 (any of C's surviving additions removed). **A re-added removal under state 3 is not caught. It is surfaced by CV-2 (L-12, UR-14).** |
+| Drift revert | Not an event; backstop as above |
+| Similar but non-identical change | Not an event; the content check decides |
+| Semantic revert | Not detected |
+| Revert outside lineage | K16 |
+| No total order | K17 |
+
+The absence of a detected revert never proves that no revert exists [B-08].
+
+---
+
+## 7. Fixture catalogue — R6Δ (every row: trace + status; all [P], none executed)
+
+### 7.0 Baseline Φ
+
+- Scratch repo with a local bare origin; no network.
+- The §1.3 environment; fixed `GIT_COMMITTER_DATE`.
+- Reflog and FETCH_HEAD are written as data, with mtimes set by `os.utime`.
+- `--now 2026-01-01T12:00:00Z`.
+- **Φ-fresh:** TR has a single `fetch: fast-forward` line with new = T at now−1h, and there is no FETCH_HEAD. This gives R7/F01/Cb5 with observed_at = 2026-01-01T11:00:00Z.
+- **Default shape:** a GitLab pair; C is the tip of `refs/remotes/origin/<b>` (R6Δ: always a remote-tracking ref, so P-04's PDB and its adoption agree).
+- **H** marks harness-injected cases.
+- Every classified expectation also implies `snapshot=full`.
+
+### 7.1 Phase A / B / C
+
+| ID | Setup | Expected | Status | Findings |
+|---|---|---|---|---|
+| FX-A01 | C = `abc1234` | TF bad-input A01 snapshot=none | B | F19 |
+| FX-A02 | `--repo x/../y` | TF bad-input A02 snapshot=none | B | F19 |
+| FX-A03 | `.git` is a file | TF integrity-refused A03 snapshot=none | B | F10 |
+| FX-A04 | H: foreign uid | TF unsafe-ownership A04 snapshot=none | B | H2 |
+| **FX-A05a** | `--now 2026-01-01 12:00:00` (syntax) | TF bad-input A05 snapshot=none | B | R5-06 |
+| **FX-A05b** | `--now 2026-02-30T12:00:00Z` (calendar) | TF bad-input A05 | B | R5-06 |
+| **FX-A05c** | `--now 2026-01-01T23:59:60Z`, and separately `--now` given twice | TF bad-input A05 (each) | B | R5-06 |
+| **FX-A05d** | Valid `--now 2025-12-31T00:00:00Z`, which is earlier than the Φ-fresh reflog line (a "future" evidence timestamp) | MERGED K24, freshness R5/F01/Cb2 future, recommend=no | B | R5-06 |
+| FX-B01a | FETCH_HEAD mode 000 | TF snapshot-unreadable-initial B01 snapshot=none | B | F2 |
+| FX-B01b | 5 MiB reflog | same | B | F18 |
+| FX-B01c | symlink under `logs/refs/remotes/origin/` | same | B | F2 |
+| FX-C01 | H: `git version 2.44.0` | TF unsupported-version C01 snapshot=files-only | B | CE3 |
+| FX-C02a | bare repo | TF preflight C02 files-only | B | F9 |
+| FX-C02b | H: absolute-git-dir mismatch | TF preflight C02 files-only | B | F9 |
+| FX-C03 | sha256 repo | TF object-format C03 files-only | B | F10 |
+| FX-C04a–k | (a) grafts, (b) alternates, (c) http-alternates, (d) loose replace, (e) packed replace, (f) shallow, (g) reftable, (h) unknown extension, (i) config.worktree, (j) commondir, (k) info/attributes | each: TF integrity-refused C04 files-only | B | F10 |
+| FX-C05a–f | (a) textconv + marker, (b) include.path, (c) gpg + showSignature + marker, (d) diff.x.command, (e) alternateRefsCommand, (f) core.worktree | each: TF config-refused C05 files-only; markers absent | B | CE3, F5, F9 |
+| FX-C06 | target absent | TF target-missing C06 files-only | B | — |
+| FX-C07 | symbolic target | TF symbolic-target C07 files-only | B | — |
+| FX-C08a–j | each §1.12 limit exceeded separately | each: TF limit C08 full | P-19 (interim = adopted) | F18 |
+| FX-C09 | H: call > 60 s | TF timeout C09 full | B | — |
+| FX-C10 | C's tree object removed | TF git-error C10 full | B | — |
+| FX-C11 | H: two patch-id lines | TF patch-id C11 full | B | CE4 |
+| FX-C12 | H: P ≠ C, np(P) = 1 | TF graph-inconsistent C12 full | B | F1 |
+| FX-C13 | H: blob read fails | TF io C13 full | B | — |
+| FX-C14 | H: exception in decide | TF internal C14 full | B | R4-03 |
+| FX-C15 | C = a tree OID | TF bad-input C15 full | B | F19 |
+
+### 7.2 Classification
+
+| ID | Setup | Expected | Status | Findings |
+|---|---|---|---|---|
+| FX-K01 | valid hex, object absent | GONE K01 recommend=no | B | — |
+| FX-K02a | octopus C ⊑ T | AMB unsupported-merge-input K02 | P-16 (interim = adopted) | R4-02 |
+| FX-K02b | octopus C ⋢ T | AMB K02 | B | F20 |
+| FX-K03 | 2-parent C ⋢ T | AMB unsupported-merge-input K03 | B | F20 |
+| FX-K04 | empty C | AMB empty-commit K04 | B | F8 |
+| FX-K05 | C merged by an octopus P | AMB unsupported-integration-shape K05 | B | R4-02 |
+| FX-K06 | unrelated root | AMB no-common-history K06 | B | F19 |
+| FX-K07 | criss-cross at C | AMB multiple-merge-bases K07 | B | — |
+| FX-K08 | criss-cross at an endpoint only | AMB multiple-merge-bases K08 | P-02 (interim = adopted) | — |
+| FX-K10a | fast-forward squash | AMB unsupported-integration-shape K10 recommend=no | B | B-14, F22 |
+| FX-K10b | cherry-pick, then ordinary merge | K10 | B | F22 |
+| FX-K11a | deleted ref, C not the tip | AMB unreachable K11 | B | F7 |
+| FX-K11b | C contained only by a tag or another remote | K11 | B | L4 |
+| **FX-K11c** | C contained only by local `refs/heads/x` | **Interim:** AMB unreachable K11. **If P-04 adopted:** LIVE K13 refs=x | P-04 | R5-07 |
+| FX-K12a | forged merge title | AMB touched-without-equivalent K12 | B | F12 |
+| FX-K12b | partial squash | K12 | B | CE5 |
+| FX-K12c | independent implementation | K12 | B | CE5 |
+| FX-K12d | prefix squash plus foreign edit | K12 | B | M5 |
+| FX-K12e | T-side rename | K12 | B | L1 |
+| FX-K12f | conflict resolved in the squash | K12 | B | CE5 |
+| FX-K12g | binary differs | K12 | B | L2 |
+| FX-K12h | whitespace reformat | K12 | UR-4 | M8 |
+| FX-K12i | chain forgery (M1 ⋢ S2^1) | K12 | B | F6 |
+| FX-K12j | pathspec-magic filenames | K12 | B | F8, M6 |
+| FX-K13a | pure addition | LIVE K13 recommend=yes | B | — |
+| FX-K13b | prefix squash; C2 after X1 | LIVE K13 | B | F14, F16, A6 |
+| FX-K13c | net-empty branch, empty squash | LIVE K13 | B | F8 |
+| FX-K13d | pathspec control | LIVE K13 | B | F8 |
+| FX-K14a | K13a on Φ-stale | STALE_REFERENCE K14 recommend=no | B | — |
+| FX-K14b | K13a plus a dev line ≠ T | STALE_REFERENCE K14 Cb1 | B (outcome); reason token P-08 | — |
+| FX-K15 | mode-only C, ancestry-direct | AMB revert-undeterminable K15, events=- | UR-11 | R4-01 |
+| FX-K16 | exact revert of C's diff made on Z (lacks S); Z merged | AMB revert-unordered K16 | P-13 (interim = adopted) | R4-01, R4-06 |
+| FX-K17 | revert on side P, reapply on side Q | AMB incomparable-events K17 | B | M7 |
+| **FX-K17b** | two exact reverts on two incomparable side branches | **Interim:** K17. **If P-15 adopted:** K18. Both AMBIGUOUS, recommend=no | P-15 | R4-06 |
+| FX-K18a | exact revert on FP | AMB reverted-after K18 events=1 | B | H3, F17 |
+| FX-K18b | exact Revert MR, squash-merged | K18. **Interim** events=2; **if P-14** events=1 | B (outcome); events P-14 | H3, A22 |
+| FX-K18c | revert plus a `--no-ff` merge with the same pid | K18. **Interim** events=2; **if P-14** events=1 | B (outcome); events P-14 | H3 |
+| FX-K18d | `revert -m 1 P` | K18 events=1 | B | R4-01 |
+| FX-K18e | revert of C's diff only (via r_C) | K18 events=1 | B | R4-01 |
+| FX-K18f | two identical exact reverts on FP | K18 events=2 | B | R4-06 |
+| FX-K19 | C's path restored to its pre-change blob | AMB path-reverted K19 | B | F24 |
+| FX-K20a | mode-only C inside a larger squash | AMB content-unassessable K20, content_basis=- | B | L2 |
+| FX-K20b | whitespace-only additions | K20 | B | — |
+| FX-K21a | C undone in its own branch | AMB superseded-in-branch K21 | P-06 (interim = adopted) | — |
+| FX-K21b | opaque path superseded | K21 | P-06 | L2 |
+| FX-K22a | added line edited later | AMB content-missing K22 content_basis=added | B | F4 |
+| FX-K22b | drifted Revert MR | K22 events=0 | B | F4, A22 |
+| FX-K22c | duplicate `}` removed elsewhere | K22 | B | — |
+| FX-K22d | removal-only C; target lacked the line | K22 content_basis=removed | P-07 | — |
+| FX-K22e | path absent in T | K22 | B | F24 |
+| FX-K22f | partial revert removing one of C's lines | K22 events=0 | B | R4-01 |
+| FX-K22g | similar change removing one of C's lines | K22 events=0 | B | R4-01 |
+| FX-K24a | Φ-stale | MERGED K24 recommend=historical, exact B-09 sentence, observed_at=2025-12-29T12:00:00Z, CV-1 | B (CV text P-21) | M3, F11 |
+| FX-K24b | Φ-none | MERGED K24 observed_at=none recommend=no | B | M3, F11 |
+| FX-K24c | dev line ≠ T | MERGED K24 Cb1 observed_at=none recommend=no | B (outcome); reason token P-08 | — |
+
+**FX-K23 variants.** All are MERGED K23 fresh=yes recommend=yes, with the fixed wording plus caveat CV-1 when content_basis=added. Status B unless marked.
+
+| # | Variant | Key fields | Findings |
+|---|---|---|---|
+| a | second-parent squash | — | F1 |
+| b | C is the tip | segment_end=C | CE1 |
+| c | deleted ref, C is the tip | — | F7 |
+| d | C-side rename | — | L1 |
+| e | revert, then reapply (direct commits) | events=2 | M7 |
+| f | Y merged before C | via S_A, segment_base=Y tip | CE5, F13, A20 |
+| g | Y merged after C | as f | CE5, F13, A20 |
+| h | second integration | via S2, segment_base=X1 | M4/F6, H1, A25 |
+| i | ordinary merge | ancestry-merge | F1 |
+| j | deep / foxtrot | — | F1 |
+| k | cherry-pick to Z, Z squashed | content-equivalent | F12 |
+| l | identical independent change | — | F12 |
+| m | `--no-ff` single commit | ancestry-merge | F1 |
+| n | two priors plus a decoy | base=X1′ | F6 |
+| o | moved line plus one addition | 1/1 | — |
+| p | one line superseded | 2/2, superseded=1, CV-3 (P-06) | — |
+| q | symlink / gitlink | binary_present=1/1, content_basis=opaque | L2 |
+| r | pair plus a SOTHER with the same pid | — | F23 |
+| s | non-C path restored | — | — |
+| t | C = M | ancestry-direct | F20 |
+| u | unrelated edit in the same file | drift=1/N | H4 |
+| v | T's root commit | ancestry-direct, base = empty tree | F19 |
+| w | partial revert of another commit's lines | events=0 | R4-01 |
+| x | similar change not touching C's lines | events=0 | R4-01 |
+| **y** R6Δ | two endpoints X1 and X1′ (X1′ = X1 plus a net-empty add/remove pair), both first-integration matches on the same M; brank 0 for both | **winner X1** (smaller ord): segment_end=X1, covering=2 | R5-01 |
+| **z** R6Δ | branch squashed at M1; exact revert on FP; the same branch re-squashed at M2 (first-integration match again) | **winner M1** (smaller pos): merge=M1, covering=2; final event is a reapply → K23. **Interim** events=3; **if P-14** events=2 | B (winner, outcome); events P-14 | R5-01 |
+| **aa** R6Δ | C adds L1 and removes L0; a later commit re-adds L0; L1 is still present | MERGED K23, content_basis=added, added_lines_present=1/1, removed_lines_absent=0/1, **CV-1 and CV-2 printed** | B (fields); caveat text P-21 | R5-04 |
+
+### 7.3 Freshness
+
+Baseline K23a. Asserted fields: freshness_trace, fresh, observed_at, freshness_source, freshness_reason, fetch_head, recommend.
+
+| ID | Setup | Expected | Status |
+|---|---|---|---|
+| FX-R1 | no TR, no FETCH_HEAD | R1/F01/Cb8, fresh=no, obs=none, no-evidence; K24 recommend=no | B |
+| FX-R2 | garbled TR line | R2/F01/Cb2 malformed | B |
+| FX-R3 | line 1 ts > line 2 ts | R3/F01/Cb2 non-monotonic | B |
+| FX-R4 | packed-refs edited; last new ≠ T | R4/F01/Cb2 newest-not-T | B |
+| FX-R5 | last ts = now+1h | R5/F01/Cb2 future | B |
+| FX-R6a | older fetch; newest `update-ref` | R6/F01/Cb7 newest-unaccepted | B |
+| FX-R6b | fetch→A, fetch→B, update-ref→A | R6/F01/Cb7 | B |
+| FX-R7a | Φ-fresh | R7/F01/Cb5 fresh=yes source=reflog | B |
+| FX-R7b | last at now−72h | R7/F01/Cb5 stale; K24 historical | B |
+| FX-R7c | last `update by push` | **Interim:** R6/F01/Cb7 fresh=no. **If P-20:** R7/F01/Cb5 fresh=yes | P-20 |
+| FX-R7d | last `pull --tags origin development` | R7/F01/Cb5 | B |
+| FX-R7e | last at exactly now−24h | fresh=yes | B |
+| FX-R7f | last at now−24h−1s | fresh=no stale | B |
+| FX-F02 | garbage FETCH_HEAD line | R7/F02/Cb3 fetch-head-malformed | B |
+| FX-F03 | FETCH_HEAD mtime now+1h | R7/F03/Cb3 future | B |
+| FX-F04 | insteadOf | R7/F04/Cb5 inadmissible-insteadof | B |
+| FX-F05 | two origin URLs | R7/F05/Cb5 | B |
+| FX-F06 | narrowed refspec | R7/F06/Cb5 | B |
+| FX-F07 | another origin reflog malformed | R7/F07/Cb5 | B |
+| FX-F08 | another ref's newest entry at now+1h | R7/F08/Cb3 future | B |
+| FX-F09 | FETCH_HEAD present, no OR files | R1/F09/Cb8 | B |
+| FX-F10 | Enew in one second, differing cmdlines | R7/F10/Cb5 | P-08 |
+| FX-F11a | newest `fetch origin 1455` | R7/F11/Cb5 | P-08 |
+| FX-F11b | newest `fetch --tags origin` | R7/F11/Cb5 | P-08 |
+| FX-F11c | newest `fetch --append origin` | R7/F11/Cb5 | P-08 |
+| FX-F12a | `fetch --all`, two remotes | **Interim:** R7/F11/Cb5. **If P-12:** R7/F12/Cb5 | P-12 |
+| FX-F12b | `fetch --all`, one remote, valid | **Interim:** R7/F11/Cb5. **If P-12 and G-F open:** F18 | P-12, GATED |
+| FX-F13 | foreign-URL line | R7/F13/Cb5 | P-08 |
+| FX-F14a | duplicate `branch 'x'` lines | R7/F14/Cb5 | P-08 |
+| FX-F14b | two dev lines = T | R7/F14/Cb5 | P-08 |
+| FX-F15 | moved ref's line missing | R7b/F15/Cb5 stale | P-08 |
+| FX-F16a | tracking ref y has no line | F16 | P-08 |
+| FX-F16b | a line differs from its tracking value | F16 | P-08 |
+| FX-F17a | mtime outside W | F17 window | P-11, UR-1 |
+| FX-F17b | Φ-stale, E* now−3h, mtime now−1h | F17 | P-11, UR-1 |
+| FX-F17c | later no-op rewrite, mtime ts*+1h | F17 | P-11, UR-1 |
+| FX-F17d | **S2:** no-op whole fetch on Φ-stale | R7/F17/Cb5, fresh=no, obs=2025-12-29T12:00:00Z, `uncorroborated-no-reflog` | B |
+| FX-F18a | **S1:** Φ-stale; whole `fetch origin` moved x at now−10m; complete FETCH_HEAD with dev = T | **Interim (G-F CLOSED):** R7/F22/Cb5, fresh=no, obs=2025-12-29T12:00:00Z, `unverified-association`, K24 historical. **If-open:** R7/F18/Cb4 fresh=yes obs=now−10m | Interim P-08; if-open GATED |
+| FX-F18b | as F18a with no TR | **Interim:** R1/F22/Cb8 fresh=no obs=none recommend=no. **If-open:** R1/F18/Cb6 | P-08 / GATED |
+| FX-F19 | as F18a but dev ≠ T | F19/Cb1 conflict, obs=none, recommend=no | B (outcome); token P-08 |
+| FX-F20 | as F18a but no dev line | F20/Cb1 dev-absent | P-10, P-08 |
+| FX-F21 | Φ-fresh; uncorroborated dev ≠ T | R7/F21/Cb1 conflict-uncorroborated | P-01 |
+| FX-Cb6 | newest TR `update-ref` at now−2h; later linked whole fetch at now−30m | **Interim:** R6/F22/Cb7 fresh=no. **If-open and P-09:** R6/F18/Cb6 fresh=yes | P-08 / GATED, P-09 |
+| FX-Cb6b | as Cb6 in the same second | R6/F10/Cb7 | P-08 |
+| FX-F-STALE-a | FETCH_HEAD = [old dev=T, x=new]; x reflog `fetch --append origin x`; Φ-stale | R7/F11/Cb5 fresh=no (fails closed) | P-08 |
+| FX-F-STALE-b | same file; x cmdline `fetch origin`; tracking y has no line | R7/F16/Cb5 fresh=no (fails closed) | P-08 |
+| FX-F-STALE-c | forgery: crafted reflog and file passing P1–P7 | **Interim:** F22 fresh=no. **If-open:** F18 (documents L-7; not a correctness pass) | OUT-OF-MODEL |
+| **FX-F-STALE-d** R6Δ | Retained dev line = current T (from an earlier fetch); a later whole fetch with `--no-write-fetch-head` moved x; FETCH_HEAD's x line is old; Φ-stale | R7/F15/Cb5 fresh=no `uncorroborated-no-link`. **It cannot establish freshness under either gate state.** | B (outcome fresh=no; holds under G-F CLOSED regardless of P-08); fc token P-08 |
+
+### 7.4 Snapshot (all H)
+
+| ID | Setup | Expected | Status |
+|---|---|---|---|
+| FX-S1 | exception in decide; stable | TF internal C14 provisional=- snapshot=full | B |
+| FX-S2 | after a provisional MERGED, FETCH_HEAD → mode 000 | TF snapshot-unreadable-final D01 provisional=K23 snapshot=final-unreadable | B |
+| FX-S3 | after a provisional MERGED, `refs/heads/x` updated | TF snapshot-changed D02 provisional=K23 snapshot=full | B |
+| FX-S4 | after a provisional MERGED, `config` changed | D02 provisional=K23 full | B |
+| FX-S5 | provisional C10, then T moves | D02 provisional=C10 full | B |
+| FX-S6 | T moved between snapshots | D02 full | B |
+| FX-S7 | ABA: T bytes and mtime restored | D02 via ctime | UR-12, P-17 |
+| FX-S8 | a fetch between snap0 file reads | D02 full | B |
+| **FX-S9a** R6Δ | C05 (config refused); files stable | TF config-refused C05 provisional=- snapshot=files-only (D00) + CV-4 | B |
+| **FX-S9b** R6Δ | initial `snap_refs` fails (H); files stable | TF git-error C10 snapshot=files-only + CV-4 | B |
+| **FX-S9c** R6Δ | C06 (target missing), then a file in scope changes | TF snapshot-changed D02 provisional=C06 snapshot=files-only | B |
+| **FX-S10** R6Δ | H: force a K result with S0r = NONE (violates I-1) | TF internal C14 | B |
+
+### 7.5 Security and determinism (status B)
+
+| ID | Setup | Expected | Findings |
+|---|---|---|---|
+| FX-X1 | hostile names | = K23b except sanitised `refs` | L3 |
+| FX-X2 | `GIT_DIFF_OPTS` / `diff.context` | = K23a | CE3, F21 |
+| FX-X3 | gitlink with `diff.submodule=log` | = K23q | CE3 |
+| FX-X4 | newline / ESC in paths | one line, no path (K23) | F8, L3 |
+| FX-X5 | planted `json.py` in cwd | = K23a, not imported | — |
+| FX-X6 | crafted commit-graph | = K23a | F10 |
+| FX-X7 | `diff.suppressBlankEmpty=true` | = K23a | CE4 |
+
+### 7.6 Real cases (runtime only; separate authorisation; [M] ids)
+
+| Case | Commits | Integrated via |
+|---|---|---|
+| RC-1..4 | `f1f8b559e` `ff8c5f308` `5f7f21871` `eea0df44a` | `04dd54f2a` / `d74c26e9c` |
+| RC-5 | `2f4c63190` | `3aa8d0351` / `895d1d6c2` |
+| RC-6 | `b49fdeaeb`, `af7a486d9` | `95fffeeb4` / `aa69d47f4` |
+| RC-7 | `96e1eb8e5`, `7c4553875` | — |
+
+- RC-1..6 expectation: MERGED or AMBIGUOUS K21/K22, recorded, never overridden.
+- RC-7 expectation: K13 or K14, or K11 under the P-04 PDB if those commits exist only on a local branch.
+- Status: UR-3.
+
+---
+
+## 8. Acceptance criteria — R6Δ (R5-05)
+
+**PV** = paper-verifiable now. **RT** = runtime, after separately authorised implementation.
+
+| ID | Kind | Fixtures | Criterion (pass iff) | Status |
+|---|---|---|---|---|
+| PV-01 | PV | §7 | Every terminal row in §3 has ≥ 1 fixture. Rows covered only by non-BINDING fixtures (C08, K08, K15, K16, K21) are listed as **conditionally covered** and are not counted as unconditional. | B |
+| PV-02 | PV | §7 | Every fixture names exactly one expected terminal trace (or one per sub-ID) and a status from §0 | B |
+| PV-03 | PV | — | Each §4 return/raise maps to one §3 row; each row appears once; the order matches | B |
+| PV-04 | PV | — | Every token used in §3, §5, §6 and §7 is defined in §1.11 | B |
+| PV-05 | PV | §5 | Every R, F and Cb row has ≥ 1 fixture. Gated rows F18, Cb4 and Cb6 have only if-open expectations. F12 is reachable only if P-12 is adopted. | B |
+| PV-06 | PV | §7 pending | Every PENDING label cites an existing PROPOSED or UNRESOLVED ID. Every PENDING-OWNER fixture states its interim expectation. No BINDING expectation depends on an open item. | B |
+| PV-07 | PV | — | No rule contradicts B-01..B-19 | B |
+| PV-08 | PV | FX-K01, K12a, K13a, K14a, K23a, K24a, K24b, A01, S9a | §1.10 covers every outcome × fresh × observed_at × snapshot combination, each with a fixture | B |
+| PV-09 | PV | §1.11 | The presence rules give one value domain per field per trace, including `snapshot` and `content_basis` | B |
+| **PV-10** R6Δ | PV | — | **M7 totality:** every component of the selection tuple is defined for every element of covering. Demonstrated by FX-K23y and FX-K23z. | B |
+| **PV-11** R6Δ | PV | — | **G-F CLOSED:** no BINDING or interim expectation contains F18, Cb4, Cb6 or `fetch_head=ok`. No interim expectation has `fresh=yes` with `freshness_source` ≠ `reflog`. | B |
+| **PV-12** R6Δ | PV | — | Every PROPOSED item has a PDB, and every rule depending on one carries an inline `[P-n · PDB]` tag | B |
+| **PV-13** R6Δ | PV | FX-S9a–c, A01, B01, S2 | `snapshot` ≠ `full` appears only on failure lines; classified lines are always `full` (I-1, I-2) | B |
+| RT-01 | RT | BINDING fixtures | The line parses under §1.11; trace, outcome, reason/code, provisional, snapshot and every listed field equal the expectation; caveats CV-n appear exactly as specified | B |
+| RT-01P | RT | PENDING / GATED fixtures | Interim expectations are checked as RT-01. If-adopted / if-open expectations are checked only after the item is resolved. | PENDING |
+| RT-02 | RT | all | 3 byte-identical runs, also with the caller's TZ, LANG, PYTHONHASHSEED, cwd and umask varied | B |
+| RT-03 | RT | all; FX-C05a,c | argv matches the allowlist; markers absent | B |
+| RT-04 | RT | all | Recursive (path, size, mtime_ns, ctime_ns, sha256) of the fixture repo is unchanged; temp dir removed | B |
+| RT-05 | RT | all; X1, X4 | Sentinel strings never appear in stdout | B |
+| RT-06 | RT | V-UR4..V-UR12 | Each verification is recorded. A disproved assumption keeps its dependent rule disabled (G-F stays CLOSED for UR-8/UR-10). | UR-closing |
+| RT-07 | RT | V-W | The W measurement meets §8.2 and the owner approves it | UR-closing |
+| RT-08 | RT | R7a, R7b, R1, K13a, K14a, K24a, K24b, F21, K23k, K23aa, S9a | Three fresh agents given only the step-4 text and helper lines agree with each other, with `recommend`, the fixed wording and the CV caveats | B |
+| RT-09 | RT | — | Implementation diff stays within the authorised files; `projects.md` unchanged; payload < 9,400 B; protected checksums unchanged | B |
+| RT-10 | RT | RC-1..7 | Independent recomputation of the real cases; AMBIGUOUS results are reported, not overridden | UR-3 + separate authorisation |
+
+### 8.1 Verification fixtures (unchanged from Revision 5)
+
+| ID | Verifies |
+|---|---|
+| V-UR4 | `patchid.stable` × `--verbatim` on whitespace variants; pin `false` if it collapses whitespace |
+| V-UR5 | `--attr-source` neutralises tree and worktree attributes; `info/attributes` is still read |
+| V-UR6 | U4–U8 |
+| V-UR8 | Reflog cmdline per WF form; `--all` truncate-then-append |
+| V-UR9 | A no-op fetch writes no reflog |
+| V-UR10 | Non-append fetch truncates and writes one line per branch |
+| V-UR11 | Mode-only patch-id |
+| V-UR12 | ctime on write-then-restore; granularity |
+
+### 8.2 V-W (unchanged)
+
+- **Fixtures:** 10, 100 and 1,000 branches × idle, loaded and large-pack conditions; ≥ 50 whole fetches each, each moving at least one ref. A real remote only with owner authorisation.
+- **Per fetch:** δ = mtime_ns − 10⁹ × ts, plus write order.
+- **Rule:**
+  - D = max |δ| + 1 s.
+  - Proposed W = ⌈2D⌉.
+  - 120 s is accepted only if ⌈2D⌉ ≤ 120 and every sample lies within ±W.
+  - Otherwise re-baseline.
+  - The owner approves either way.
+
+---
+
+## 9. Finding reconciliation
+
+### 9.1 Revision 5 review findings
+
+The original IDs and severities are preserved.
+
+| ID | Sev | Defect (as stated) | Validity | Correction (R6) | Affected | Status |
+|---|---|---|---|---|---|---|
+| R5-01 | HIGH | `ord(base)` undefined for first-integration bases (B_X ∉ E) | **Valid.** B_X is reachable from T, so it is excluded by `--not T`. | brank (0 for a base outside E, else 1 + ord); tuple (pos(M), −brank, ord(X), OID(base), OID(S)) with a totality argument | §1.8.2 M7; §4; FX-K23y,z; PV-10 | Resolved in design |
+| R5-02 | HIGH | F18 positive freshness rests on unverified git behaviour | **Valid.** The design says so itself. | Gate G-F, CLOSED in R6: F22 replaces F18; Cb4/Cb6 unreachable; fallback = no positive F evidence; FX-F-STALE-d; UR-15 | §1.6.4–1.6.7; §5; FX-F18a/b, Cb6, F-STALE-c/d; PV-11 | Addressed (positive path disabled); association **not proven**, R4-05 stays partial |
+| R5-03 | HIGH | Partial snapshot comparison presented like a full one | **Valid** | `snapshot` field (full / files-only / none / final-unreadable); invariants I-1–I-3; CV-4; FX-S9a–c, S10; PV-13 | §1.5; §1.11; §4; §3 | Resolved in design |
+| R5-04 | HIGH | Mixed add/remove partial revert can yield MERGED | **Valid as a consumer-interpretation risk.** Consistent with B-08, as the reviewer notes. | `content_basis` field; mandatory caveats CV-1 and CV-2; L-12; UR-14 (alternatives a/b/c, none selected) | §1.7.3; §1.10; §1.11; FX-K23aa | Surfaced; strengthening = owner decision UR-14 |
+| R5-05 | MEDIUM | Trace coverage not fully demonstrated; pending fixtures counted | **Valid** | Every fixture row states its trace and status; conditional-coverage list; PV-01/02/06 tightened | §0; §3; §7; §8 | Resolved in design |
+| R5-06 | MEDIUM | Malformed `--now` had no failure path | **Valid** | Row A05 with explicit rules; FX-A05a–d; future-relative evidence mapped to R5 | §1.2; §3; §1.11; §7.1 | Resolved in design |
+| R5-07 | MEDIUM | Proposed behaviour embedded in the algorithm | **Valid** | Every P item has a PDB; inline `[P-n · PDB]` tags; interim / if-adopted expectations; PV-12. PDB changes: P-04 remote-only, P-12 excluded, P-14 no dedup, P-15 total order, P-20 not accepted | §1 (tags); §2; §6; §7 | Resolved in design |
+
+### 9.2 Revision 4 findings
+
+These use the Revision 5 reviewer's assessments, updated for Revision 6.
+
+| ID | Assessment after R5 review | After R6 |
+|---|---|---|
+| R4-01 | Partial | Partial. Mode-only (UR-11) is still unverified; the partial-revert blind spot is surfaced (CV-2) but remains. |
+| R4-02 | Partial (`ord(base)`) | The `ord(base)` defect is fixed (R5-01). Resolved in design, pending review. |
+| R4-03 | Partial | Snapshot completeness made explicit. Resolved in design; UR-12 remains. |
+| R4-04 | Resolved | Resolved, strengthened by PDBs. |
+| R4-05 | Partial | **Still partial.** The positive path is disabled; the association itself is unverified (UR-8, UR-10). |
+| R4-06 | Partial | Selection ordering fixed; event dedup and ordering now have fail-closed PDBs. Resolved in design, pending P-13–P-15. |
+| R4-07 | Partial | Conditional vs unconditional coverage made explicit. Resolved in design. |
+| R4-08 | Partial | Grammar extended (A05, F22, `snapshot`, `content_basis`); PV-10–PV-13 added. Resolved in design, pending review. |
+
+### 9.3 Prior finding IDs (ORIGINAL FINDING TEXT REQUIRED)
+
+| ID | Label as supplied | Where addressed | Status |
+|---|---|---|---|
+| CE1 | C excluded from endpoints | M1; FX-K23b,c | Addressed |
+| CE2 | FETCH_HEAD URL `.git` | norm; FX-F04, F18a | Addressed (gated) |
+| CE3 | env/config alter pid | §1.3; FX-X2, X3, C05 | Addressed |
+| CE4 | many pid lines | §1.7.2; FX-C11, X7 | Addressed |
+| CE5 | side-branch false MERGED | M5; FX-K23f,g, K12i | Addressed |
+| H1 | coverage undefined | M6/M7 (R6Δ); FX-K23h,y,z | Addressed |
+| H2 | isolation | §1.3; FX-A04, X2 | Addressed; UR-5 |
+| H3 | Revert MR missed | §6; FX-K18a–c, K22b | Partial (L-3) |
+| H4 | MERGED overclaims | §1.9, §1.10 + CV-1–CV-3 | Addressed |
+| M1 | normalisation | §1.6.4 | Addressed |
+| M2 | reflog acceptance | R rows | Addressed |
+| M3 | stale form | FX-K24a,b | Addressed |
+| M4 | second integration | M5; FX-K23h | Addressed |
+| M5 | candidate base | cand; FX-K12d | Addressed |
+| M6 | candidate scan | cand; FX-K12j | Addressed; UR-6 |
+| M7 | event order | §6.5; FX-K17, K17b | Addressed |
+| M8 | whitespace | FX-K12h | Partial (UR-4) |
+| L1–L4 | renames / binary / sanitise / namespaces | §1.7.3, §1.11, M1 | Addressed |
+| F1 | ancestry P search | FX-K23i,j,m, C12 | Addressed |
+| F2 | false FRESH / race | R rows, §1.5; FX-S* | Addressed |
+| F3 | freshness | §1.6; §5 | Addressed; S1 gated; S2 UNRESOLVED |
+| F4 | drifted revert | FX-K22a,b | Addressed |
+| F5 | gpg | C05; FX-C05c | Addressed |
+| F6 | second-integration code | M5; FX-K23h,n, K12i | Addressed |
+| F7 | deleted branches | M1; FX-K11a, K23c | Addressed |
+| F8 | pathspec magic | FX-K12j, K13d, X4 | Addressed; UR-6 |
+| F9 | config scope | C05 | Addressed |
+| F10 | grafts / commit-graph | C04; FX-X6 | Addressed |
+| F11 | recommendation | §1.10; PV-08 | Addressed |
+| F12 | equivalence ≠ attribution | FX-K23k,l | Addressed |
+| F13 | A20 rationale | FX-K23f,g | Addressed |
+| F14 | A6 prefix | FX-K13b | Addressed |
+| F15 | untestable criteria | §8 | Addressed |
+| F16 | dead covers/excl | M6, cand | Addressed |
+| F17 | Rv asymmetry | §6.1 | Addressed |
+| F18 | event limit | FX-C08 | Addressed (P-19) |
+| F19 | inputs | FX-A01, A02, A05, C15, K06 | Addressed |
+| F20 | merge input | K02, K03; FX-K23t | Addressed |
+| F21 | doubtful env | FX-X2 | Partial (UR-6) |
+| F22 | rebase-merge gap | K10 | Gap kept (B-14) |
+| F23 | merge uniqueness | FX-K23r | Addressed |
+| F24 | absent files | FX-K19, K22e | Addressed |
+| A6 | highlighted case | FX-K13b | Addressed |
+| A20 | highlighted case | FX-K23f,g | Addressed [R] |
+| A22 | highlighted case | FX-K22b, K18b | Addressed [R] |
+| A25 | highlighted case | FX-K23h | Addressed [R] |
+
+F16–F24 were mapped by order from a grouped summary and may be misassigned.
+
+---
+
+## 10. Change summary (Revision 5 → Revision 6)
+
+| R5 section | R6 section | Change |
+|---|---|---|
+| Header | §0 | Fixture statuses GATED and OUT-OF-MODEL; PDB concept; inline tags |
+| §1.2 | §1.2 | A05 and the `--now` rules |
+| §1.5 | §1.5 | `snapshot` completeness values; invariants I-1–I-3 |
+| §1.6.3 | §1.6.3–1.6.4 | P-20 PDB (not accepted); P-12 PDB (excluded); F22 added; F18 behind G-F |
+| §1.6.4 | §1.6.5 | Cb4/Cb6 unreachable while closed |
+| — | §1.6.6 | **New:** gate G-F |
+| §1.6.5 | §1.6.7 | S1 → not fresh (gated) |
+| §1.7.3 | §1.7.3 | `content_basis`; state-3 note |
+| §1.8.2 | §1.8.2 | P-04 PDB (remote-only); **M7 brank and new tuple** |
+| §1.10 | §1.10 | Caveats CV-1–CV-4 |
+| §1.11 | §1.11 | A05, F22, `content_basis`, `snapshot`, `unverified-association`, BASIS, SNAP |
+| §1.13 | §1.13 | L-1 updated; L-12, L-13 |
+| §2 | §2 | PDB column; P-21; UR-14, UR-15 |
+| §3 | §3 | A05; snapshot column; per-row status; conditional coverage list |
+| §4 | §4 | `--now`; I-1 check; scope/snapshot; G-F constant |
+| §5 | §5 | F22; gating; F19 outcome binding; interim columns |
+| §6 | §6 | PDB for P-13/P-14/P-15 |
+| §7 | §7 | FX-A05a–d, K11c, K17b, K23y/z/aa, F-STALE-d, S9a–c, S10; interim / if-adopted expectations |
+| §8 | §8 | PV-01/02/05/06 tightened; PV-10–PV-13 |
+| §9 | §9 | R5 reconciliation added; R4 statuses updated |
+| §10 | §12 | Review instructions updated |
+
+---
+
+## 11. Design-only adversarial self-check
+
+These are the author's own doubts about Revision 6, listed for the next reviewer to test.
+
+1. **Do the PDBs change real-world usefulness?** Yes, and deliberately.
+   - Under P-04's PDB, commits that exist only on a local branch (unpushed) become AMBIGUOUS(unreachable). Before a branch is pushed, Observe would report AMBIGUOUS, not LIVE.
+   - Under G-F CLOSED, S1 fetches never count as fresh. More results become STALE_REFERENCE and `historical`.
+
+   Both fail closed, but they lower usefulness. The owner should know this before approving the PDBs.
+2. **Is the brank argument airtight?** Totality holds because every component is defined and S is determined by M. The **semantics** of "prefer a chained base over a first-integration base on the same M" are a choice, not a derivation; the author could not construct a fixture where both occur on the same M. If the reviewer finds one, the tie-break may need re-justifying.
+3. **Is F19 really outcome-binding?** Yes. A dev line ≠ T is NEG in both branches (F19 corroborated, F21 uncorroborated under P-01's PDB). If the owner rejects P-01, an uncorroborated mismatch becomes INSUF. FX-K14b, FX-K24c and FX-F19 are corroborated cases and stay NEG under B-12. FX-F21 alone would change.
+4. **Is F22 itself dependent on P-08?** Yes. Reaching F22 requires the corroboration checks. Whatever P-08's fate, the outcome is never `fresh=yes` from F, which is why FX-F-STALE-d's `fresh=no` is listed as BINDING.
+5. **Does I-1 hold structurally?** Phase C returns a K result only after `snap_refs` succeeds, so S0r ≠ NONE for every K. FX-S10 exercises the guard only through harness injection.
+6. **Are the caveat requirements consistent with the binding wording?** CV lines are printed **after** the binding B-09 sentence and never alter it. Whether Observe's consumer output can carry extra lines is a step-4 text matter for the implementation phase.
+7. **Residual unverified assumptions presented as fact?** None found. Every git or filesystem behaviour the design depends on is tagged UR-n or [M]; [M] items are the earlier measured facts only.
+8. **Coverage gaps known:**
+   - C08, K08, K15, K16 and K21 have no BINDING fixture;
+   - F12 is unreachable under its PDB;
+   - F18, Cb4 and Cb6 are gated.
+
+   All are declared, not hidden.
+9. **Scope:** no D2–D5 or A2.6 content. `projects.md` and GOAL-11 are untouched.
+
+---
+
+## 12. Independent-review instructions (Revision 6, text-only)
+
+```
+You are an INDEPENDENT adversarial reviewer. Your only input is the "A2.5.1 Revision 6 —
+Specification Packet" text. Use no tools, run no commands, access no repository,
+filesystem or network, implement nothing, execute no tests, change no files or memory.
+Do not suggest executing textconv, external diff drivers or repository-provided programs.
+
+Treat [M] as reported-only, [R] reasoned, [P] unexecuted, UR-n unresolved. Never claim any
+behaviour was verified. Your verdict authorizes nothing.
+
+Test specifically:
+1. R5-01..R5-07: is each correction valid and complete? Is the M7 tuple total, and is its
+   tie-break order defensible? Try to construct two covering matches the tuple cannot rank.
+2. Gate G-F: can any path produce fresh=yes from FETCH_HEAD while G-F is CLOSED? Does any
+   BINDING or interim expectation rely on F18/Cb4/Cb6?
+3. Snapshot completeness: can a classification line ever carry snapshot≠full? Can a
+   files-only comparison ever let a classification stand? Do I-1..I-3 hold in §4?
+4. PDBs (§2): is each truly fail-closed? Does any rule in §1 depend on a PROPOSED item
+   without an inline tag? Is any PENDING fixture missing its interim expectation?
+5. Content and caveats: does CV-1/CV-2 make L-12 visible without altering B-09? Are UR-14's
+   alternatives correctly left undecided?
+6. A05 and freshness: is every malformed or impossible --now caught, and are future
+   evidence timestamps handled only by R5/F03/F08?
+7. Precedence/pseudocode/grammar/fixtures/criteria consistency (PV-01..PV-13): every token
+   defined, every row reachable once, every fixture with one trace and a valid status.
+8. Freshness misclassification, revert/event errors, and any new unsupported assumption.
+9. Whether R4 statuses in §9.2 are stated honestly (R4-05 must remain partial).
+
+Report:
+1. Verdict: exactly PASS or REVISE, with evidence.
+2. Findings ranked CRITICAL / HIGH / MEDIUM / LOW, each with ID (R6-nn), section, quoted
+   evidence, counterexample or failure scenario, impact, minimal correction.
+3. Table: R5-01..R5-07 — resolved / partially / not resolved.
+4. Advisory list of PDBs and UR items you consider safe or unsafe to approve (owner decides).
+5. Statement that you used no tools, ran no commands and modified nothing.
+```
+
+*End of packet.*
