@@ -1,0 +1,263 @@
+# A2.5.1 Revision 6 — Independent Adversarial Review (report)
+
+*Saved 2026-10-15 ~21:01 on the owner's request ("save in handoff when the review finishes").*
+*Reviewer: a fresh Opus subagent (general-purpose) launched by Rezd at the owner's choice. It had no access to the conversation. Its input was the owner's review prompt, verbatim, plus the Revision 6 packet `handoffs/2026-10-15-a2.5.1-revision-6-review-packet.md` (committed `afb0dfe`), read in two calls on that one file. It used no other tools.*
+*The report below is reproduced unedited. It is model output and carries no owner authority; nothing in it is a decision.*
+
+---
+
+# A2.5.1 Revision 6: Independent Adversarial Review Report
+
+## 1. Verdict
+
+**REVISE**
+
+The R6 corrections hold in their central claims:
+- **M7 tuple:** it is total.
+- **G-F gate:** no path produces `fresh=yes` from FETCH_HEAD while it is CLOSED.
+- **Invariant I-1:** it holds structurally in §4.
+
+The packet still fails on four counts:
+- A content metric that the R5-04 mitigation relies on measures the wrong quantity. Its mandatory caveat is false in a common case (R6-01).
+- The MERGED wording claims "no exact revert detected" in cases where the helper did detect one (R6-02).
+- Invariant I-2 is contradicted by §3 (R6-03).
+- Several fixtures marked BINDING depend on open items. PV-06 is false as written, and §5 and §11 contain a false claim about this (R6-04).
+
+This verdict authorises nothing: no implementation, no commit, no move to A2.6.
+
+## 2. Findings
+
+### HIGH
+
+**R6-01 HIGH — §1.7.3 (j/J), §1.10 CV-2, §1.11 `removed_lines_absent`, P-07 state 4**
+
+*Evidence:*
+- "j — removals still absent in T | Σ min(S_R, max(0, Tb − Tn))"
+- CV-2: "<J−j> line(s) this commit removed are present again in the target; the change may not be intact."
+
+*Problem:* j is measured relative to the integration base Tb. It does not measure whether the line is absent from T.
+
+*Counterexample (ancestry-merge or squash):*
+- A branch commit C0 adds debug line L0. A later commit C on the same branch removes L0 and adds L1.
+- The target never had L0, so Tb = P^1 (or S^1) has 0 copies and Tn has 0.
+- Pre = 1 and End = 0, so S_R = 1 and J = 1.
+- j = min(1, max(0, 0 − 0)) = 0.
+- Result: MERGED, content_basis=added, `removed_lines_absent=0/1`, and CV-2 prints that one removed line is "present again in the target". L0 is in fact absent from T.
+
+The same base-relative arithmetic causes a second problem. A removal-only "remove debug line" commit (state 4, which requires j = J) becomes AMBIGUOUS(content-missing) even though it is fully integrated.
+
+*Impact:*
+- A mandatory, normative caveat states a falsifiable fact that is false in a common workflow.
+- The field name misdescribes its value.
+- State 4 gives frequent false AMBIGUOUS results.
+- FX-K23aa does not separate the two meanings. UR-14 option (b) would inherit the defect.
+
+*Smallest correction:* redefine j against the commit's own pre-image, for example j = Σ min(S_R, max(0, Pre − Tn)), meaning C's removals not re-present in T. Alternatively, rename the field and reword CV-2 to describe only what j measures. Add a fixture for a removed branch-local line.
+
+**R6-02 HIGH — §1.9 MERGED meaning [B-08], §1.10 fresh-MERGED text [P-18], §6.6/§6.7, FX-K23e and FX-K23z**
+
+*Evidence:*
+- "MERGED | Historical integration detected; no exact revert detected [B-08]"
+- "no exact revert detected; presence, deployment and completion are not established."
+- §6.7: "Exact revert, then exact reapply, totally ordered → Continues to the content check"
+
+*Counterexample:*
+- FX-K23e ("revert, then reapply", events=2) is BINDING and expected MERGED K23 recommend=yes with the fixed wording.
+- FX-K23z (exact revert on FP, then re-squash) is the same: MERGED.
+- In both, the helper detected an exact revert as an event. The printed sentence says none was detected, and no caveat mentions the revert.
+
+*Impact:*
+- The consumer text is literally false.
+- PV-07 ("no rule contradicts B-01..B-19") fails against B-08 as §1.9 quotes it, unless B-08's owner text already allows for revert-then-reapply. The packet does not say.
+
+*Smallest correction:*
+- Either change the wording to "no unreapplied exact revert detected", which needs owner review if B-08's text is binding.
+- Or add a mandatory caveat CV-5, "an exact revert was detected and later re-applied (events=n)", whenever the event set contains a revert.
+- Then re-run PV-07 explicitly against B-08's verbatim text.
+
+### MEDIUM
+
+**R6-03 MEDIUM — §1.5 I-2 vs §3 snapshot column vs §4**
+
+*Evidence:*
+- I-2: "A files-only comparison may let only a provisional C-row result stand: one of C01–C07 or C10."
+- §3 gives C08 and C14 a snapshot value of "full or files-only".
+- §3 gives C09, C11 and C13 a snapshot value of "full" only.
+
+*Counterexamples:*
+- `config --list --show-scope -z` exceeds 64 MiB during preflight: C08 stands with files-only. This violates I-2 but follows §3.
+- `git version` hangs for more than 60 s: C09 with files-only. This contradicts §3 ("full").
+- An exception in preflight: C14 with files-only. This violates I-2.
+
+The §4 `scope` also depends on phaseC setting S0r by side effect ("# sets S0r after preflight"). A value-returning implementation loses S0r when a later exception is raised, and C12 or C11 then report files-only.
+
+*Impact:* the core R5-03 correction is internally inconsistent, and PV-13 cannot be checked as written.
+
+*Smallest correction:* restate I-2 as "only failure (TF) provisional results; never a K result". Make every C row's snapshot column read "full or files-only, by phase of occurrence". Make S0r an explicit output of phaseC that is carried through exceptions.
+
+**R6-04 MEDIUM — §0 BINDING definition, §5 statuses and note, §7.3, §11 #3 and #7, PV-06, PV-12**
+
+*Evidence:*
+- BINDING means "do not depend on any open register item".
+- §5 marks F06, F07, F08 and F09 as "B". But §1.6.4 calls F06–F17 "Corroboration checks P1–P7", F09 is literally "P1", and P-08 is "Association checks P1–P7 and WF".
+- FX-F17d is marked "B". F17 is P7 [P-11 · UR-1], and the S2 premise depends on UR-9 ("A no-op fetch writes no reflog").
+
+*FX-K14b ("K13a plus a dev line ≠ T"):*
+- On Φ-fresh, the only OR entry is the TR fetch with new = T, so Enew contains it.
+- P5 then requires the dev line to equal T. It does not, so F15 fails and the case is **uncorroborated**: it is F21 under P-01, not F19.
+- If P-01 is rejected, F gives INSUF, the result is Cb5 `fresh=yes`, and the outcome flips to LIVE K13.
+- This falsifies the §5 note ("Under any decision on P-08 and P-01, a dev line ≠ T yields NEG") and §11 #3 ("FX-K14b … are corroborated cases"). §11 #3 itself concedes that rejecting P-01 gives INSUF.
+- FX-K24c is underspecified in the same way.
+
+*Missing inline tags (PV-12):* rows F09–F16 have no `[P-08]` tag; only WF has one. The P-05 TF codes are untagged.
+
+*Impact:* PV-01, PV-06 and PV-12 are asserted but false. The binding-coverage count is overstated, so R5-05 and R5-07 are only partially resolved.
+
+*Smallest correction:*
+- Relabel FX-F06, F07, F08, F09 and F17d as PENDING(P-08 / P-11 / UR-1 / UR-9), splitting outcome from token as FX-F-STALE-d does.
+- Relabel FX-K14b PENDING(P-01) with an if-rejected expectation (LIVE K13).
+- Fix the §5 note and §11 #3.
+- Add `[P-08]` tags to F09–F16 and a `[P-05]` tag to the TF code list.
+
+**R6-05 MEDIUM — §1.1, §1.10, §1.11, RT-01, §7 (caveat emission channel)**
+
+*Evidence:*
+- "Observe copies the helper's output line, its recommend field and the §1.10 caveats verbatim."
+- The grammar is a single line: `line = classified / failure`, with no caveat production.
+- RT-01 (helper fixtures): "caveats CV-n appear exactly as specified".
+
+*Problem:*
+- The caveats are not in the helper's output, so RT-01 cannot test them. The R5-04 and R5-03 mitigations (CV-1 to CV-4) rest entirely on a non-deterministic consumer that derives J−j and n itself. Only RT-08 checks this, with 3 agents.
+- Fixture expectations are inconsistent:
+  - FX-S9a lists "+ CV-4";
+  - FX-A01–A05, B01, C01–C07, S2 and S9c (all `snapshot≠full`) do not.
+
+*Smallest correction:* either have the helper emit caveat tokens in a grammar-defined field (for example `caveats=CV1,CV2`, with the fixed text in §1.10), or move the caveat check from RT-01 to an explicit step-4 criterion. Add CV-4 to every non-full fixture expectation.
+
+**R6-06 MEDIUM — §1.6.4 (undefined ts* and Enew; evaluation order)**
+
+*Evidence:* F08 "ts* > now"; F10 "Enew cmdlines differ"; F15 "for each e ∈ Enew". Neither term is defined anywhere in the packet.
+
+*Ordering contradictions:*
+- F08 needs ts* but is evaluated before F09 ("P1: no OR entry"). FX-F09 (no OR files) therefore evaluates an undefined ts*.
+- F08 is a CONTRA row inside the step that "record[s] the first failure fc". It is not stated whether an earlier fc (F06/F07) stops F08.
+- freshness_trace carries a single FROW, so F06 + F08 has two possible traces.
+
+*Smallest correction:*
+- Define ts* (maximum ts over the newest entry of each OR file, or over all entries) and Enew.
+- Move F08 after F09, or make F08 evaluate only when OR is non-empty.
+- State that CONTRA rows take precedence over fc for FROW and Cb selection.
+
+**R6-07 MEDIUM — §1.8.2 M1 ord, M5, M7 (ordering semantics); PV-10; §11 #2**
+
+*Evidence:*
+- "ord(X) = rank of X in the helper's own topological order of E (Kahn's algorithm; OID ascending breaks ties)". The direction is never stated.
+- M7 reads "earliest endpoint" (min ord) and "latest segment base" (max brank). M5 processes "X2 ∈ E in order" and needs prior endpoints already in V.
+
+*Problem:* all of this is correct only if ancestors come first. With children-first Kahn ordering, chaining silently finds nothing and M7 picks the latest endpoint instead of the earliest. Totality is unaffected, so PV-10 passes while the meaning inverts.
+
+*§11 #2 ("could not construct" chained and first-integration matches on the same M) is wrong. A stacked-MR construction:*
+1. Branch b1 = N + Q1 → X1 is squashed at M1.
+2. Branch b2 = N + C + D → Z.
+3. X2 = merge(X1, Z) is squashed at M2.
+
+Then:
+- chained match: (X2, base X1, M2), since pid(X1, X2) = C+D;
+- first-integration match: (Z, base N, M2), since pid(N, Z) = C+D.
+
+Both cover C. −brank picks X2, so End = X2 rather than Z, which can change S_A and superseded. Because brank uses topological rank, "latest base" between incomparable chained bases is an OID artefact.
+
+*Smallest correction:* state "parents before children" for ord. Add a fixture for the construction above. Document −brank as an owner-visible policy choice (a P-item with a PDB) rather than a derivation.
+
+**R6-08 MEDIUM — §1.6.3 R6/R7 (freshness misclassification)**
+
+*Evidence:* "Accepted cmdlines: `^(fetch|pull)( |$)`". R7 never checks which remote or URL the update came from.
+
+*Counterexample:*
+- `git fetch . feature:refs/remotes/origin/development` (local self-fetch), or `git fetch upstream development:refs/remotes/origin/development`.
+- The TR newest entry is "fetch …", with new = T and ts = now.
+- R7 POS, then Cb5 `fresh=yes`, then K23 or K13 with recommend=yes, all based on a target state the origin server never had.
+- This is not .git forgery (L-7); it is an ordinary git command.
+
+*Smallest correction:* accept only cmdlines whose first non-option argument is absent or `origin`, with no explicit destination refspec. Everything else becomes R6 INSUF. Add fixtures.
+
+### LOW
+
+**R6-09 — §1.5 ref record vs §1.6.1/F16.** The ref record is "T plus the SHA-256" of `for-each-ref`, but F16 needs the tracking-ref *values*. Either keep the raw output or name a separate snapshotted read.
+
+**R6-10 — §1.6.5 precedence.** For R2 (malformed) together with F03 (future), the Cb2 row reports R's reason ("malformed"). The blocking order ranks "future > malformed". The two disagree and no fixture decides it.
+
+**R6-11 — §1.6.6 vs F04/F05.** The packet says "Negative F evidence (F19–F21) is still evaluated", but F04/F05 "stop F evaluation". With insteadOf configured, a mismatching dev line is ignored and R7 still gives `fresh=yes`. Correct the statement or evaluate F19/F21 on raw lines.
+
+**R6-12 — §1.6.6 opening conditions.**
+- UR-7 (write order) and UR-9 (no-op fetch writes no reflog) are omitted.
+- P-09 is omitted, yet Cb6 is "[P-09 · PDB: unreachable]" while §1.6.6 implies Cb6 becomes reachable when the gate opens.
+
+**R6-13 — Token and fixture hygiene (PV-02, PV-04).**
+- "R7b" in FX-F15 is not an RROW token.
+- "via S_A" in K23f is not a VIA token.
+- Φ-stale and Φ-none are never defined; only Φ-fresh is, in §7.0.
+- FX-A05c holds two setups under one ID.
+- FX-A05b and FX-A05c omit `snapshot=none`.
+
+**R6-14 — §1.2 inputs and timestamps.**
+- No row covers a missing `--repo`, a duplicate `--repo`, a missing C, extra positional arguments or unknown options. The order among A01–A05 when several apply is unstated.
+- The sampling instant of the system-clock `now` is unstated, and so is the comparison of `mtime_ns` against whole-second `now` in F03.
+- The claim that future timestamps are handled "only by R5/F03/F08" is inaccurate: a future non-newest TR entry is caught by R3 (non-monotonic). This is harmless, since both are CONTRA.
+
+**R6-15 — §1.8.2 K08.** "A count of 0 → C12". An E commit from a legitimately merged unrelated history (a subtree or `--allow-unrelated-histories` merge on the branch) is reported as TOOL_FAILURE graph-inconsistent rather than AMBIGUOUS. It fails closed but is mislabelled.
+
+**R6-16 — L-13, §11 #1, RC-7, REFID.**
+- A local-only C can still be MERGED (endpoint X = C ∈ E) or K10, so "AMBIGUOUS(unreachable)" is overstated.
+- REFID is limited to 24 characters, but whether the `refs/remotes/origin/` prefix is stripped is unspecified. FX-K11c expects "refs=x". Full refnames would truncate and collide.
+
+**R6-17 — §1.8.2 K10.** "a shape hit covers C" / `covers(hits, C)`: the covering predicate for PMAP_O hits is not defined. M6 defines covering only for V.
+
+## 3. R5 reconciliation
+
+| ID | Status | Basis |
+|---|---|---|
+| R5-01 | **Resolved** (totality) | brank makes every component defined, and the injectivity argument holds. Ordering semantics remain under-specified (R6-07). |
+| R5-02 | **Resolved by disablement** | No FETCH_HEAD path reaches POS while G-F is CLOSED: F18 is replaced by F22, and Cb4/Cb6 need F=POS. No BINDING or interim expectation contains F18, Cb4, Cb6 or `fetch_head=ok`. The association remains unproven (UR-15), and R4-05 is correctly kept partial. |
+| R5-03 | **Partially resolved** | The `snapshot` field works and I-1 holds in §4, but I-2 conflicts with §3 (R6-03) and CV-4 has no defined channel (R6-05). |
+| R5-04 | **Partially resolved** | It is made visible, but the j metric and CV-2 are wrong for branch-local removals (R6-01). The caveat channel is undefined (R6-05). |
+| R5-05 | **Partially resolved** | Several "B" fixtures depend on P-08, P-01, P-11, UR-1 or UR-9 (R6-04). There are undefined tokens and baselines (R6-13). |
+| R5-06 | **Resolved** | A05 covers syntax, calendar, range and repetition, with fixtures. Wider argv gaps remain (R6-14, LOW). |
+| R5-07 | **Partially resolved** | Every P item has a PDB, but inline tags are missing for P-08 (F09–F16) and P-05. FX-K14b's undeclared dependence on P-01 is a hidden PDB dependency (R6-04). |
+
+## 4. Advisory: proposed decisions and unresolved items (the owner decides)
+
+**Safe to approve as PDBs.** Each fails closed:
+- P-02, P-04 (with the usability cost L-13 / R6-16), P-05, P-06, P-09 (unreachable), P-10, P-11, P-12 (excluded), P-13, P-14 (no dedup), P-15 (total order), P-16, P-17, P-19 and P-20 (not accepted).
+- P-01 is also safe: it only lowers freshness. Note that a stale FETCH_HEAD will veto valid reflog freshness, for example after an `update by push`.
+
+**Unsafe to approve as written:**
+- **P-07:** fails closed, but under R6-01 it makes removals of branch-local lines falsely AMBIGUOUS. Fix j first.
+- **P-21:** the CV-2 wording is false in the R6-01 case. There is also no caveat for revert-then-reapply (R6-02).
+- **P-18:** "no exact revert detected" is false for K23e and K23z (R6-02).
+- **P-08:** safe only as corroboration while G-F is CLOSED. Not safe as an association proof. ts* and Enew must be defined first (R6-06).
+
+**Unresolved items:**
+- **UR-1, UR-8, UR-10, UR-15 (G-F):** unsafe to open. They are unverified, and the opening conditions are incomplete (R6-12).
+- **UR-2 option (d):** safe as an interim.
+- **UR-14:** none of (a), (b) or (c) should be chosen until j is corrected, because (b) would inherit R6-01.
+- **UR-3, UR-13:** owner decisions; nothing in them is unsafe pending a decision.
+- **UR-4, UR-5, UR-6, UR-11, UR-12:** remain unverified, and their dependent fixtures are correctly labelled.
+- **UR-9:** not reflected in FX-F17d (R6-04).
+
+## 5. Blockers to PASS and what resolves each
+
+1. **R6-01:** redefine j relative to Pre (or rename it and reword CV-2), and add a fixture for a removed branch-local line.
+2. **R6-02:** reconcile the MERGED wording with revert-then-reapply. The owner must confirm B-08's verbatim text, and a CV-5 caveat or a wording change is needed.
+3. **R6-03:** restate I-2 and correct the §3 snapshot column. Make S0r an explicit output of phaseC.
+4. **R6-04:** relabel the affected fixtures, correct the §5 note and §11 #3, and add the missing inline tags.
+5. **R6-05:** define where caveats are emitted and how they are tested. Add CV-4 to every non-full fixture.
+6. **R6-06:** define ts* and Enew, and fix the F08/F09 ordering and CONTRA-vs-fc precedence.
+7. **R6-07:** state the ord direction, add a fixture for the stacked-MR case, and declare −brank as a policy choice.
+8. **R6-08:** restrict R7 to fetches from origin.
+
+The LOW items should be fixed in the same revision but do not block on their own.
+
+## 6. Tool-use confirmation
+
+The only tool used was Read, on the one input file `/home/uitm/Project-AI-MemoryCore/handoffs/2026-10-15-a2.5.1-revision-6-review-packet.md`. It took two calls on that same file: the first returned lines 1–768 and was truncated, and the second read the rest from offset 769, as the brief allowed. Nothing else was used: no commands, no other files, no repository or git access, no network, no tests and no edits. No memory or file was created or modified, and nothing was implemented or executed.
