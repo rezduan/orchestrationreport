@@ -1,0 +1,193 @@
+# A2.5.1 Revision 8 — Independent Adversarial Review (report)
+
+*Saved 2026-10-15 ~22:40 on the owner's request ("save in handoff when the review finishes").*
+*Reviewer: a fresh Opus subagent (general-purpose) launched on the owner's instruction. It had no access to the conversation. Its input was the Revision 8 packet `handoffs/2026-10-15-a2.5.1-revision-8-review-packet.md` (committed `2f4cf06`), whose §13 was its protocol, plus brief extra instructions. It read that one file in three parts and used no other tools.*
+*The report below is reproduced unedited. It is model output and carries no owner authority; nothing in it is a decision.*
+
+---
+
+# Independent adversarial review: A2.5.1 Revision 8 Specification Packet
+
+## 1. Verdict: **REVISE**
+
+Each area below was checked against the normative text. The §9 tables were not taken as proof.
+
+| Area (§13 item) | Assessment |
+|---|---|
+| 1. R7 dispositions | Most are real and traceable: R7-03, 04, 05, 07, 08, 09 and 10 are resolved. **R7-01 and R7-02 are not resolved as claimed**; see R8-01 to R8-06. |
+| 2. R7-01 arithmetic | The identity j_land = Σ(req − landed) = j_miss holds term by term. The `-s ours` removal case is now K22 (FX-K22i is correct). But: (a) j_miss **falsely blocks** genuine squash and ancestry-merge integrations whenever C removes a branch-local line whose text also occurs in the target file (R8-01). (b) Additions and opaque paths are still not required to land, so a `-s ours` merge plus a later coincidental line gives a false MERGED (R8-02). (c) A sibling removal can mask C's non-landing (R8-03). The §1.7.3 squash claim ("j_miss > 0 only if M's merge result kept a target-held copy") is false, so PV-17 fails on paper. |
+| 3. R7-02 origin | Literal OU rules let local or loopback origins reach fresh=yes in four ways: (b) matches scheme URLs and `file://`; `transport::address` passes; insteadOf is ignored on the R side; the loopback list is incomplete (R8-04 to R8-06). Leaving fork identity to P-25 is correct, and no URL is invented. |
+| 4. Consistency | Coverage arithmetic is correct (52 = 8+1+15+8+18+2; 7 conditional; 45 binding). Cb1–Cb9 is total and disjoint (checked pair by pair). Remaining inconsistencies: F24 vs FROW (R8-08), refs presence on K06/K07, and the undefined `removed_lines_unlanded` denominator (R8-09). |
+| 5. Register | Every P-n has a PDB and an if-rejected behaviour. The CV6 *token* on K23/K13/R7 fixtures depends on how P-25 is adopted, and that is not labelled (R8-12). P-03 is missing without a note. |
+| 6. G-F | No FETCH_HEAD path to fresh=yes while CLOSED was found. F18, Cb4, Cb6 and Cb9 are unreachable. Every fresh=yes comes from R7 → Cb5. |
+| 7. Caveats | Emission conditions are consistent. The CV1 and CV6 texts (and the §1.9 MERGED meaning) claim more than the checks establish (R8-05, R8-07). |
+| 8. Argv / clock | No argv was found that maps to two rows. The clock argument assumes a monotonic wall clock, and the term "snap0a" is undefined (R8-10). |
+| 9. §11 | N-10 to N-14 are real. Missing items: R8-01 (not covered by N-10), R8-02, R8-04 and R8-05. |
+
+## 2. Findings
+
+### HIGH
+
+**R8-01 — j_miss falsely blocks genuine integrations; the squash reconciliation claim is false (§1.7.3)**
+- **Evidence:**
+  - `req = min(S_R, Tb)`, described as "Removals the target could apply (it held those copies)".
+  - Squash row: "j_miss > 0 only if M's merge result kept a target-held copy: a real non-landing, correctly reported".
+  - PV-17: "The §1.7.3 mode reconciliation holds."
+- **Counterexample (squash):** this is FX-K23ac with one realistic change. File f in the target already contains an unrelated line `}`, so Tb(`}`) = 1. C0 adds a function ending in `}` and C deletes that function. Then Pre = 2, Post = 1, End = 1, so S_R = 1. The segment's net change for `}` is 0, so S's diff does not touch it and Tip = Tb = 1. That gives req = 1, landed = min(1, 0) = 0, j_miss = 1. The integration is correct, but the result is K22 content-missing.
+- **Same setup, ancestry-merge:** P^1 holds the unrelated `}` and the merge is correct: j_miss = 1, K22.
+- **Same setup, FX-K23ab:** with Tb ≥ 1 for L0, this becomes state 3 with j_miss = 1, K22.
+- **Ancestry-direct:** not affected, because Tb = Pre and Tip = Post.
+- **Why this is common:** an MR that adds and then removes code inside a file containing common lines (`}`, `end`, `</div>`, `return;`).
+- **Impact:** removal-bearing commits routinely become AMBIGUOUS. It fails closed, but the normative claim and PV-17 are false. N-10 does not describe this case (it is not a conflict-resolved merge).
+- **Smallest correction:** cap req by the integration unit's own net removal. Let Bu be the branch-side base of the unit: B_X for squash, merge-base(P^1, P^2) for ancestry-merge, Pre for direct. Then `req = min(S_R, Tb, max(0, Bu − End))`. Add fixture K23ac′ (ac with an unrelated identical L0 in the target, expected MERGED) and correct the mode table.
+
+**R8-02 — Additions and opaque paths are not required to land, so a false MERGED survives in ancestry-merge (§1.7.3 "Additions", §1.9)**
+- **Evidence:**
+  - "k checks additions against Tb and Tn, so an addition that did not land, or did not survive, fails k = K. No separate landing quantity is needed."
+  - The §1.9 MERGED meaning: "C's surviving content is reflected at integration".
+- **Counterexample:** pure-addition C adds `return null;` to f. It is integrated by `merge -s ours`, so Tip = Tb. A later, unrelated target commit adds `return null;` elsewhere in f, so Tn = Tb + 1. Then k = min(1, 1) = 1 = K, b = B, and there is no revert. On Φ-fresh the result is **MERGED K23, recommend=yes**, yet C's content never landed.
+- **Opaque paths:** the same happens because b tests OID(Tn) = OID(Post), not Tip.
+- **Impact:** this is the additions-side twin of R7-01's `-s ours` path. The text claiming it is closed is false.
+- **Smallest correction:** add `a_miss = Σ(S_A − min(S_A, max(0, Tip − Tb)))` and an opaque landing test OID(Tip) = OID(Post). Require both to be zero in states 3 and 5, keeping k = K on Tn, which honours B-18. Add a fixture "K22k: `-s ours` addition plus later identical line → K22".
+
+**R8-04 — OU form (b) is ambiguous and swallows scheme URLs, `file://` and remote-helper URLs, so a local origin can be fresh=yes (§1.6.3 OU)**
+- **Evidence:** "(b) scp form `host:path`, where host is non-empty, contains no `/` or `\`, is not one character long …, is not `localhost`, and does not start with `.`". OU holds iff u is "one of" (a) or (b).
+- **Counterexamples** (each passes (b) when read literally):
+  - `file:///home/x/repo.git` (host `file`);
+  - `https://localhost/x` (host `https`);
+  - `gcrypt::/home/x/repo` or `ext::git-upload-pack /home/x/repo`. Here host is `gcrypt` or `ext`; git treats `<transport>::<address>` as a remote helper, and both can serve a local repository.
+- With Φ-fresh, any of these gives R7/F01/Cb5 with fresh=yes. The prose "OU fails for `file://`" contradicts the rule rather than being implied by it.
+- PV-18 checks only fixtures, so it passes vacuously.
+- **Smallest correction:** parse in a fixed order.
+  1. If u contains `::` before any `/`, OU fails.
+  2. If u matches `^[A-Za-z][A-Za-z0-9+.-]*://`, it must satisfy (a) (one of the four schemes); otherwise OU fails.
+  3. Only otherwise try (b).
+
+  Add fixtures R9e (`https://localhost/x`), R9f (`gcrypt::/p`) and R9g (`ext::…`), each expected R9.
+
+**R8-05 — insteadOf and other URL rewriting bypass R9; FX-F04 itself expects fresh=yes with insteadOf present (§1.4, §1.6.3, §1.6.4, CV6, L-15)**
+- **Evidence:**
+  - §1.4: "`url.*.insteadOf` … handled by F04, not refused".
+  - R9 tests only norm(remote.origin.url).
+  - FX-F04: "insteadOf; all dev lines = T → R7/F04/Cb5" (fresh).
+  - The environment sets `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_NOSYSTEM=1`.
+- **Counterexamples:**
+  - Repo config `url./home/x/mirror.insteadOf=https://example.invalid/team/repo.git`: the fetch actually used a local path, yet the result is R7, F04 (INSUF) → Cb5, fresh=yes, with CV6 saying freshness "refers to the configured origin remote" (it does not).
+  - The same rewrite in the user's **global** config is invisible to the helper.
+  - remote.origin.url changed after the fetch (it was `.` at fetch time).
+  - `remote.origin.uploadpack` and ssh host aliases.
+- **Impact:** L-15's "OU rejects local origins" is an overclaim, and CV6 is untrue in these cases.
+- **Smallest correction:**
+  - R9 also fails when any `insteadOf` key exists in the visible configuration (or when `remote.origin.uploadpack` is set).
+  - Restate OU as a syntactic heuristic over the *current local* configuration.
+  - Disclose global/system insteadOf, ssh aliases and URL-changed-since-fetch in L-15 and in the CV6 text.
+  - Change FX-F04 to R9/F04/Cb7.
+
+### MEDIUM
+
+**R8-03 — A sibling removal masks C's non-landing in ancestry-merge (§1.7.3)**
+- **Counterexample:**
+  - f holds two target-held copies of L0 (Tb = 2, at locations A and B). C removes A (Pre = 2, Post = 1); later branch commit C′ removes B (End = 0).
+  - A hand-resolved merge keeps A and drops B, so Tip = 1.
+  - S_R = 1, req = 1, landed = min(1, 1) = 1, j_miss = 0, j_inc = 0.
+  - State 4 gives **MERGED**, although C's own removal did not land.
+- Squash is immune because S's hunks equal the segment's.
+- **Impact:** a false MERGED remains in the family the packet calls a closed "safety invariant". L-4 discloses that counts have no provenance, but §1.9 and CV1 claim landing.
+- **Smallest correction:** attribute the unit's landing conservatively: `landed = max(0, min(req, (Tb − Tip) − (min(Tb, NetU) − req)))`, where NetU = max(0, Bu − End). Otherwise downgrade the claims (R8-07) and add a fixture.
+
+**R8-06 — Loopback exclusion is incomplete and host extraction is undefined (§1.6.3 OU (a)/(b))**
+- **Evidence:** (a) excludes only "`localhost`, `127.0.0.1` or `::1`"; (b) excludes only `localhost`.
+- **Counterexamples that pass:**
+  - `ssh://127.0.0.2/r` and `https://[::1]/r` (bracketed IPv6 never equals `::1`);
+  - `https://LOCALHOST/r` (comparison is byte-exact);
+  - `ssh://localhost:22/r` (port not split from the host);
+  - `localhost.`, `0.0.0.0`, `127.1`;
+  - scp `127.0.0.1:r` and `[localhost]:r`.
+- **Correction:**
+  - Define host extraction: strip userinfo, port and brackets, lowercase, strip a trailing dot.
+  - Reject `localhost`, `*.localhost`, 127.0.0.0/8, ::1, 0.0.0.0 and numeric shorthand forms, in both (a) and (b).
+  - Disclose residual DNS and own-hostname cases.
+
+### LOW
+
+**R8-07 — Several texts claim more than the checks establish (§1.9 MERGED row, CV1, CV6)**
+- "C's surviving content is reflected at integration" and CV1's "requires its removals to have landed" go beyond what is checked. The checks are count-based and cover only target-held removals; given R8-02 and R8-03 they are not provenance claims.
+- CV6 is not emitted on `historical` lines, which name the origin just the same.
+- **Correction:** say "net line counts consistent with landing" and extend CV6 to recommend=historical.
+
+**R8-08 — The FROW is ambiguous under F24 (§1.6.4)**
+- F24 is a terminal "stop", and "FROW selection: the terminal row if F stopped". Yet F24 says "Some D line ≠ T → F21 (P-01) or INSUF", and FX-F19 expects FROW F21.
+- The token for "INSUF" with D ≠ T and P-01 rejected is undefined (no fc row exists).
+- **Correction:** F24 ∧ D ≠ T gives FROW F21 under P-01, else FROW F24 with token `corroboration-not-applied`.
+
+**R8-09 — Presence rules and field definitions have gaps (§1.11, §4)**
+- `refs` is required on K06 and K07, but §4 returns K06/K07 before M1 computes refs.
+- The denominator of `removed_lines_unlanded` is undefined. The fixtures imply J (K23ab gives 0/1 while Σreq = 0).
+- PV-03's "each site maps to exactly one row" is false for `return K13 if … else K14` and `K23 … K24`.
+- **Correction:** drop K06/K07 from the refs rule (or compute M1 first), define the denominator as J, and split those two sites.
+
+**R8-10 — Clock rationale (§1.2)**
+- "snap0a" is never defined (§4 uses `snap_files`).
+- Reflog ts and `now` are wall-clock, not monotonic. A backward NTP step after a reflog write gives R5/F03 `future` CONTRA, not D02.
+- **Correction:** define snap0a and restate the residual. It fails closed, so this is a documentation fix only.
+
+**R8-11 — The Φ baseline contradicts itself (§7.0)**
+- It says "Scratch repo with a local bare origin" while origin = `https://example.invalid/…` and nothing is fetched.
+- An implementer who wires the bare repo as origin turns every R7 fixture into R9.
+- **Correction:** delete "local bare origin".
+
+**R8-12 — The CV6 token's dependence on P-25 is unlabelled (§7, PV-06)**
+- If P-25 is adopted with a mandatory pin, CV6 disappears from every K23/K13/R7a fixture. These fixtures are labelled B with only the *text* pending.
+- P-25's adoption semantics (whether the pin is optional, and how ssh vs scp forms compare) are undefined.
+- P-03 is missing from the register without a note.
+
+## 3. Reconciliation
+
+| ID | Status | Basis |
+|---|---|---|
+| R7-01 | **PARTIALLY RESOLVED** | `-s ours` removal fixed (K22i, K22j); R8-01, R8-02 and R8-03 remain; PV-17 fails |
+| R7-02 | **PARTIALLY RESOLVED** (local exclusion not resolved; fork identity correctly DEFERRED to P-25) | R8-04, R8-05, R8-06 |
+| R7-03 | RESOLVED | Minor residual R8-12 |
+| R7-04 | RESOLVED | K23ac and K22h are coherent (but see R8-01's variant) |
+| R7-05 | RESOLVED | Minor PV-03 wording issue (R8-09) |
+| R7-06 | PARTIALLY RESOLVED | refs on K06/K07 (R8-09) |
+| R7-07 | RESOLVED | Text pending P-21 |
+| R7-08 | RESOLVED | Cb totality verified; new F24 issue is R8-08 |
+| R7-09 | RESOLVED | — |
+| R7-10 | RESOLVED | — |
+| R7-11 | RESOLVED (LOW residual R8-10) | — |
+| R6-01 | PARTIALLY RESOLVED | Tied to R7-01 |
+| R6-04 | RESOLVED | — |
+| R6-08 | PARTIALLY RESOLVED | R8-04 to R8-06; fork identity deferred |
+| R6-16 | RESOLVED (residual R8-09) | — |
+| R6-02, 03, 05, 06, 07, 09–15, 17 | Resolved per the packet; **original texts not in the packet, so not independently verifiable**; no contrary evidence found | — |
+| R5-01, 03, 06 | Resolved per the packet; not verifiable | — |
+| R5-02 | DEFERRED (disabled behind G-F, not fixed) | — |
+| R5-04, 05, 07 | Claimed resolved in design; **not verifiable** (no original text; §9.3 itself says the mapping may be misassigned) | — |
+
+## 4. Advisory (the owner decides; nothing here is a decision)
+
+**Safe as interim (fail-closed):**
+- **PDBs:** P-01 (NEG), P-02 (K08), P-04 (exclude), P-05, P-06, P-10, P-13, P-14 (none), P-15, P-16 (K02), P-17 (include), P-20 (reject), P-23 (NEG), P-24 (K25), and P-25's PDB (unpinned + CV6).
+- **Owner question:** UR-2 option (d).
+
+**Approve only after a fix:**
+- P-07 PDB: fix R8-01 first. Until then, rejection (state 4 always K22) is the safer choice.
+
+**Unsafe to approve now:**
+- P-08 (as more than a gated PDB), P-09, P-11 and P-12: they depend on UR-1 and UR-7 to UR-10, and P-12 accepts `--all` cmdlines whose remote set is unverified.
+- P-18 and P-21 texts: not until R8-05 and R8-07 are fixed.
+- P-22: requires an explicit B-08 amendment.
+- P-25 mechanism: not until R8-05 is fixed (a pin compares the configured URL, not the effective one) and the norm/equivalence rules are defined.
+- **P-25 value:** the owner must supply it; it must not be invented.
+
+**Other owner questions:**
+- UR-14: (b) is the safer option; (a) leaves L-12.
+- UR-3: needs real cases.
+- UR-13: harmless either way.
+
+**Verification items (UR-1, UR-4 to UR-12, UR-15):** none can be approved on paper; each needs measurement.
+
+## 5. Statement of conduct
+
+I made Read calls on one file only: `/home/uitm/Project-AI-MemoryCore/handoffs/2026-10-15-a2.5.1-revision-8-review-packet.md`. I read it in three consecutive parts (offsets 1, 761 and 1221) to the end. I made no other tool calls apart from this report hand-off. No commands, tests, git, textconv or repository programs were run. No files, memory or settings were changed. This verdict authorises nothing: no implementation, commit, G-F opening or A2.6.
